@@ -1,0 +1,30 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Build/
+
+# Visual Studio
+.vs/
+*.sln
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+
+# Rider
+.idea/
+*.DotSettings.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Compiled Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Packaged plugin
+*.zip

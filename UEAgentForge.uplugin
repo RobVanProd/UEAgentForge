@@ -1,0 +1,25 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "UEAgentForge",
+	"Description": "Enterprise-grade AI agent control surface for Unreal Engine 5. Provides a transactional, constitution-enforced, 4-phase-verified command bridge over the Remote Control API. The first free, open-source comprehensive bridge for AI-native UE5 development.",
+	"Category": "Scripting",
+	"CreatedBy": "UEAgentForge Contributors",
+	"CreatedByURL": "https://github.com/your-org/UEAgentForge",
+	"DocsURL": "https://github.com/your-org/UEAgentForge/wiki",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/your-org/UEAgentForge/issues",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UEAgentForge",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	],
+	"EnabledByDefault": true
+}

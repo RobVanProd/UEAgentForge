@@ -262,46 +262,50 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 		}
 	}
 
-	// Open the real transaction
-	FScopedTransaction Transaction(
-		FText::FromString(FString::Printf(TEXT("AgentForge: %s"), *Cmd)));
-
-	// Phase 2: Snapshot + Rollback test (wraps the actual execution)
-	bool bCommandSuccess = false;
+	// Phase 2: Snapshot + Rollback test — intentionally runs BEFORE opening the real
+	// transaction. The rollback test opens and cancels its own inner FScopedTransaction
+	// to confirm that undo works for this command type. Only on success do we open
+	// the permanent transaction below.
 	if (VE)
 	{
 		FVerificationPhaseResult SnapResult = VE->RunSnapshotRollback(
 			[&]() -> bool
 			{
-				// This lambda is called twice: once in rollback test (cancelled), once for real.
-				// We route to the appropriate command handler.
+				// Executes inside a temporary cancelled sub-transaction (rollback test).
+				// Changes are intentionally undone — this is the safety proof.
 				FString Dummy;
-				if (Cmd == TEXT("spawn_actor"))            { Dummy = Cmd_SpawnActor(Args); }
-				else if (Cmd == TEXT("set_actor_transform")){ Dummy = Cmd_SetActorTransform(Args); }
-				else if (Cmd == TEXT("delete_actor"))       { Dummy = Cmd_DeleteActor(Args); }
-				else if (Cmd == TEXT("create_blueprint"))   { Dummy = Cmd_CreateBlueprint(Args); }
-				else if (Cmd == TEXT("compile_blueprint"))  { Dummy = Cmd_CompileBlueprint(Args); }
-				else if (Cmd == TEXT("set_bp_cdo_property")){ Dummy = Cmd_SetBlueprintCDOProperty(Args); }
-				else if (Cmd == TEXT("edit_blueprint_node")){ Dummy = Cmd_EditBlueprintNode(Args); }
+				if (Cmd == TEXT("spawn_actor"))                  { Dummy = Cmd_SpawnActor(Args); }
+				else if (Cmd == TEXT("set_actor_transform"))     { Dummy = Cmd_SetActorTransform(Args); }
+				else if (Cmd == TEXT("delete_actor"))            { Dummy = Cmd_DeleteActor(Args); }
+				else if (Cmd == TEXT("create_blueprint"))        { Dummy = Cmd_CreateBlueprint(Args); }
+				else if (Cmd == TEXT("compile_blueprint"))       { Dummy = Cmd_CompileBlueprint(Args); }
+				else if (Cmd == TEXT("set_bp_cdo_property"))     { Dummy = Cmd_SetBlueprintCDOProperty(Args); }
+				else if (Cmd == TEXT("edit_blueprint_node"))     { Dummy = Cmd_EditBlueprintNode(Args); }
 				else if (Cmd == TEXT("create_material_instance")){ Dummy = Cmd_CreateMaterialInstance(Args); }
-				else if (Cmd == TEXT("set_material_params")){ Dummy = Cmd_SetMaterialParams(Args); }
-				else if (Cmd == TEXT("rename_asset"))       { Dummy = Cmd_RenameAsset(Args); }
-				else if (Cmd == TEXT("move_asset"))         { Dummy = Cmd_MoveAsset(Args); }
-				else if (Cmd == TEXT("delete_asset"))       { Dummy = Cmd_DeleteAsset(Args); }
-				else if (Cmd == TEXT("setup_test_level"))   { Dummy = Cmd_SetupTestLevel(Args); }
-				else if (Cmd == TEXT("execute_python"))     { Dummy = Cmd_ExecutePython(Args); }
+				else if (Cmd == TEXT("set_material_params"))     { Dummy = Cmd_SetMaterialParams(Args); }
+				else if (Cmd == TEXT("rename_asset"))            { Dummy = Cmd_RenameAsset(Args); }
+				else if (Cmd == TEXT("move_asset"))              { Dummy = Cmd_MoveAsset(Args); }
+				else if (Cmd == TEXT("delete_asset"))            { Dummy = Cmd_DeleteAsset(Args); }
+				else if (Cmd == TEXT("setup_test_level"))        { Dummy = Cmd_SetupTestLevel(Args); }
+				else if (Cmd == TEXT("execute_python"))          { Dummy = Cmd_ExecutePython(Args); }
 				return !Dummy.Contains(TEXT("\"error\""));
 			},
 			Cmd);
 
 		if (!SnapResult.Passed)
 		{
-			Transaction.Cancel();
 			OutResult = ErrorResponse(FString::Printf(
 				TEXT("Snapshot+Rollback FAILED: %s"), *SnapResult.Detail));
 			return false;
 		}
 	}
+
+	// Open the REAL transaction — only reached after Phase 2 confirmed rollback works.
+	// All operations below are permanently recorded in the undo history.
+	FScopedTransaction Transaction(
+		FText::FromString(FString::Printf(TEXT("AgentForge: %s"), *Cmd)));
+
+	bool bCommandSuccess = false;
 
 	// Execute for real (the snapshot rollback lambda already ran it inside a cancelled tx;
 	// now we execute again inside the real open transaction).
@@ -373,7 +377,9 @@ bool UAgentForgeLibrary::EnforceConstitution(const FString& ActionDesc, TArray<F
 
 FString UAgentForgeLibrary::ExecutePythonScript(const FString& ScriptCode)
 {
-	return Cmd_ExecutePython(nullptr); // Simplified overload — see Cmd_ExecutePython
+	TSharedPtr<FJsonObject> Args = MakeShared<FJsonObject>();
+	Args->SetStringField(TEXT("script"), ScriptCode);
+	return Cmd_ExecutePython(Args);
 }
 
 bool UAgentForgeLibrary::EditBlueprintNode(const FString& BlueprintPath, const FString& NodeSpecJson)
@@ -646,11 +652,13 @@ FString UAgentForgeLibrary::Cmd_TakeScreenshot(const TSharedPtr<FJsonObject>& Ar
 	const FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
 	const FString Path = FPaths::Combine(Dir, FString::Printf(TEXT("%s_%s.png"), *Filename, *Timestamp));
 
-	// Use GEditor viewport screenshot
-	FRequestedScreenShot Request;
-	Request.Filename = Path;
-	Request.ShowUI   = false;
-	GEditor->TakeHighResScreenShots();
+	// Use the HighResShot console command — reliable cross-platform editor screenshot.
+	// The file is written at next render tick; Path is returned immediately for the agent.
+	if (GEditor)
+	{
+		UWorld* World = GEditor->GetEditorWorldContext().World();
+		GEditor->Exec(World, *FString::Printf(TEXT("HighResShot %s"), *Path));
+	}
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),   true);
@@ -1187,17 +1195,18 @@ FString UAgentForgeLibrary::Cmd_ExecutePython(const TSharedPtr<FJsonObject>& Arg
 		return ErrorResponse(TEXT("PythonScriptPlugin not available. Enable it in your .uproject plugins list."));
 	}
 
-	FPythonCommandEx Cmd;
-	Cmd.Command      = ScriptCode;
-	Cmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
-	Cmd.FileExecutionScope = EPythonFileExecutionScope::Public;
+	// ExecuteStatement runs a code string directly (not a file path).
+	// For multi-line scripts, write to a .py file and use ExecuteFile mode instead.
+	FPythonCommandEx PyCmd;
+	PyCmd.Command       = ScriptCode;
+	PyCmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteStatement;
 
-	const bool bOk = Python->ExecPythonCommandEx(Cmd);
+	const bool bOk = Python->ExecPythonCommandEx(PyCmd);
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),     bOk);
-	Obj->SetStringField(TEXT("output"), Cmd.CommandResult);
-	Obj->SetStringField(TEXT("errors"), bOk ? TEXT("") : Cmd.CommandResult);
+	Obj->SetStringField(TEXT("output"), bOk ? PyCmd.CommandResult : TEXT(""));
+	Obj->SetStringField(TEXT("errors"), bOk ? TEXT("") : PyCmd.CommandResult);
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));

@@ -273,5 +273,5 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*UEAgentForge was born from [AquaEchos](https://github.com/your-org/AquaEchos),
+*UEAgentForge was born from [AquaEchos](https://github.com/RobVanProd/AquaEchos),
 a dolphin adventure game built entirely with AI-native Unreal Engine development workflows.*

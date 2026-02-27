@@ -657,3 +657,138 @@ subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_sc
 ```
 
 This captures whatever is visible on screen. **Limitation:** Terminal windows overlay the UE editor and will appear in the capture. Use `focused_shot.py` (Lesson 23) for clean viewport-only screenshots.
+
+---
+
+### Lesson 32: execute_python args structure — script in "args" sub-object
+
+**Problem:** Sending `{"cmd":"execute_python","script":"..."}` returns `{"error":"execute_python requires 'script' field."}` even though the `script` field appears to be present.
+
+**Root cause:** `ExecuteCommandJson` always extracts `Args` from `Root["args"]` (a nested sub-object). If no `args` key exists, `Args` remains an empty `FJsonObject`. All command-specific parameters (including `script` for `execute_python`) must live inside the `args` sub-object.
+
+**Fix:** Use `{"cmd":"execute_python","args":{"script":"exec(open(path).read())"}}`.
+
+---
+
+### Lesson 33: PostProcessVolume — settings on actor, not component
+
+**Problem:** `ppv.get_components_by_class(unreal.PostProcessComponent)` returns an empty list for `APostProcessVolume`. Attempting to configure PP settings via a non-existent component does nothing.
+
+**Root cause:** `APostProcessVolume` exposes its `FPostProcessSettings` struct directly via a UPROPERTY on the actor itself, not through a separate component.
+
+**Fix:**
+```python
+s = ppv.get_editor_property('settings')
+s.override_vignette_intensity = True
+s.vignette_intensity = 0.7
+# ... modify other settings ...
+ppv.set_editor_property('settings', s)
+```
+
+Also mark volume as Unbound: `ppv.set_editor_property('bUnbound', True)`.
+
+---
+
+### Lesson 34: GoodSky Blueprint enum access pattern
+
+**Problem:** `unreal.Enum_GoodSky_Preset` raises `ImportError`. Blueprint (UserDefined) enums are not automatically imported into the `unreal` module namespace.
+
+**Fix:** Get the enum class from an existing property value:
+```python
+current_val = sky.get_editor_property('SkyPreset')  # e.g. CUSTOM_MODE_FROM_TIME_OF_DAY
+enum_class = type(current_val)  # Enum_GoodSky_Preset Python class
+# Set a specific preset:
+sky.set_editor_property('SkyPreset', enum_class.MIDNIGHT_BLOOD_MOON)
+sky.call_method('ReceiveBeginPlay')  # Apply the DataTable preset lookup
+```
+
+**Available horror presets:** `MIDNIGHT_STORM=5`, `MIDNIGHT_MOON=7`, `MIDNIGHT_BLOOD_MOON=8`, `STYLE_DEATH=19`, `STYLE_DARK_SOULS=20`.
+
+---
+
+### Lesson 35: Blackboard keys — new_object + BlackboardEntry API
+
+**Problem:** `unreal.BlackboardKeyType_Object` does not exist in the `unreal` module.
+
+**Fix:** Load key type classes via `load_class()` and create instances with `new_object()`:
+```python
+obj_cls = unreal.load_class(None, '/Script/AIModule.BlackboardKeyType_Object')
+bool_cls = unreal.load_class(None, '/Script/AIModule.BlackboardKeyType_Bool')
+vec_cls  = unreal.load_class(None, '/Script/AIModule.BlackboardKeyType_Vector')
+
+key_type = unreal.new_object(vec_cls, bb)  # outer = BlackboardData asset
+entry = unreal.BlackboardEntry()
+entry.set_editor_property('entry_name', unreal.Name('LastKnownLocation'))
+entry.set_editor_property('key_type', key_type)
+
+existing = bb.get_editor_property('keys')
+existing.append(entry)
+bb.set_editor_property('keys', existing)
+unreal.EditorAssetLibrary.save_asset('/Game/Horror/AI/BB_Warden', only_if_is_dirty=False)
+```
+
+---
+
+### Lesson 36: BehaviorTree.BlackboardAsset is CPF_Protected — use C++ command
+
+**Problem:** `bt.set_editor_property('BlackboardAsset', bb)` raises protection error in Python. `set_editor_properties({'BlackboardAsset': bb})`, `modify()` + set, and `BehaviorTreeFactory` do not help.
+
+**Fix:** Add a C++ command to UEAgentForge that sets `BT->BlackboardAsset = BB` directly:
+```json
+{"cmd":"set_bt_blackboard","args":{"bt_path":"/Game/AI/BT_Warden","bb_path":"/Game/AI/BB_Warden"}}
+```
+Requires `"AIModule"` in Build.cs and `#include "BehaviorTree/BehaviorTree.h"` + `#include "BehaviorTree/BlackboardData.h"`.
+
+**Key insight:** C++ bypasses Python's CPF_Protected restriction on any UObject property.
+
+---
+
+### Lesson 37: WeightedBlendables (PostProcess CRT layer) API
+
+```python
+crt_mat = unreal.load_asset('/Game/.../00_animated_crt_v2_1_pp')
+wb = unreal.WeightedBlendable()
+wb.weight = 0.0           # weight 0 = invisible; driven to 1.0 by SanityComponent
+wb.object = crt_mat
+blendables = unreal.WeightedBlendables()
+blendables.array = [wb]
+s.weighted_blendables = blendables
+ppv.set_editor_property('settings', s)
+```
+
+---
+
+### Lesson 38: Live Coding trigger from external process (ctypes)
+
+Live Coding cannot be triggered by running UBT directly from an external process (fails with "Unable to build while Live Coding is active"). Instead, send `Ctrl+Alt+F11` to the UE editor main window:
+
+```python
+import ctypes, time
+user32 = ctypes.windll.user32
+
+target_hwnd = None
+def enum_callback(hwnd, _):
+    global target_hwnd
+    if user32.IsWindowVisible(hwnd):
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, buf, 256)
+        if 'Unreal Editor' in buf.value:
+            target_hwnd = hwnd
+    return True
+WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+
+if target_hwnd:
+    user32.SetForegroundWindow(target_hwnd)
+    time.sleep(0.5)
+    VK_CONTROL, VK_MENU, VK_F11, KEYEVENTF_KEYUP = 0x11, 0x12, 0x7A, 0x0002
+    user32.keybd_event(VK_CONTROL, 0, 0, 0)
+    user32.keybd_event(VK_MENU, 0, 0, 0)
+    user32.keybd_event(VK_F11, 0, 0, 0)
+    time.sleep(0.1)
+    user32.keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+```
+
+Wait ~75 seconds for compile (35 actions with UBA cache) + hot-patch injection. Even adding new module dependencies (e.g., `AIModule`) to Build.cs works via this path since UBT runs a full relink in Live Coding mode.

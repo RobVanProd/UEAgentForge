@@ -59,6 +59,9 @@
 #include "IPythonScriptPlugin.h"
 // Transaction safety — explicit with NoPCHs
 #include "ScopedTransaction.h"
+// AI asset wiring — set_bt_blackboard bypasses Python CPF_Protected restriction
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BlackboardData.h"
 #endif
 
 // ============================================================================
@@ -204,7 +207,9 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	// execute_python bypasses ExecuteSafeTransaction — Python scripts may perform
 	// non-undoable operations (new_level, load_level, file I/O) that break rollback
 	// verification. Route directly so the script runs once without a test phase.
-	if (Cmd == TEXT("execute_python"))  { return Cmd_ExecutePython(Args); }
+	if (Cmd == TEXT("execute_python"))        { return Cmd_ExecutePython(Args); }
+	// set_bt_blackboard bypasses Python CPF_Protected restriction on BehaviorTree::BlackboardAsset
+	if (Cmd == TEXT("set_bt_blackboard"))     { return Cmd_SetBtBlackboard(Args); }
 
 	// Mutating commands run inside a full safe transaction with verification.
 	if (IsMutatingCommand(Cmd))
@@ -1422,6 +1427,53 @@ FString UAgentForgeLibrary::Cmd_SetupTestLevel(const TSharedPtr<FJsonObject>& Ar
 	Obj->SetBoolField (TEXT("ok"),          true);
 	Obj->SetArrayField(TEXT("log"),         LogArr);
 	Obj->SetArrayField(TEXT("test_actors"), ActorArr);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+// ============================================================================
+//  AI ASSET WIRING
+// ============================================================================
+FString UAgentForgeLibrary::Cmd_SetBtBlackboard(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	// args: { "bt_path": "/Game/Horror/AI/BT_Warden", "bb_path": "/Game/Horror/AI/BB_Warden" }
+	FString BtPath, BbPath;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("bt_path"), BtPath))
+		return ErrorResponse(TEXT("set_bt_blackboard requires 'bt_path' arg."));
+	if (!Args->TryGetStringField(TEXT("bb_path"), BbPath))
+		return ErrorResponse(TEXT("set_bt_blackboard requires 'bb_path' arg."));
+
+	// Load the BehaviorTree
+	UBehaviorTree* BT = Cast<UBehaviorTree>(
+		StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *BtPath));
+	if (!BT) return ErrorResponse(FString::Printf(TEXT("BehaviorTree not found: %s"), *BtPath));
+
+	// Load the BlackboardData
+	UBlackboardData* BB = Cast<UBlackboardData>(
+		StaticLoadObject(UBlackboardData::StaticClass(), nullptr, *BbPath));
+	if (!BB) return ErrorResponse(FString::Printf(TEXT("BlackboardData not found: %s"), *BbPath));
+
+	// Assign via C++ — bypasses Python's CPF_Protected restriction
+	BT->Modify();
+	BT->BlackboardAsset = BB;
+	BT->GetOutermost()->MarkPackageDirty();
+
+	// Save the BT asset
+	FString PackagePath  = FPackageName::ObjectPathToPackageName(BtPath);
+	FString AssetFilePath = FPackageName::LongPackageNameToFilename(
+		PackagePath, FPackageName::GetAssetPackageExtension());
+	UPackage* Package = BT->GetOutermost();
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = EObjectFlags::RF_Public | EObjectFlags::RF_Standalone;
+	UPackage::SavePackage(Package, BT, *AssetFilePath, SaveArgs);
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField  (TEXT("ok"),      true);
+	Obj->SetStringField(TEXT("bt_path"), BtPath);
+	Obj->SetStringField(TEXT("bb_path"), BbPath);
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));

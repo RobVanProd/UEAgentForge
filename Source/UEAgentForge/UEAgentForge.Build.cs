@@ -49,6 +49,9 @@ public class UEAgentForge : ModuleRules
 
 			// Python scripting bridge
 			"PythonScriptPlugin",     // execute_python
+
+			// AI asset wiring — set_bt_blackboard (BehaviorTree/BlackboardData access)
+			"AIModule",
 		});
 	}
 }

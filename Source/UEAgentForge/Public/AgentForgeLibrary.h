@@ -97,6 +97,14 @@
  * ─── SCENE SETUP ────────────────────────────────────────────────────────────
  *
  *   setup_test_level      → {ok, log[], test_actors[]}  args: [floor_size=10000]
+ *
+ * ─── AI ASSET WIRING ────────────────────────────────────────────────────────
+ *
+ *   set_bt_blackboard     → {ok, bt_path, bb_path}
+ *                           args: bt_path, bb_path
+ *                           Links a BlackboardData asset to a BehaviorTree via C++,
+ *                           bypassing Python's CPF_Protected restriction on
+ *                           BehaviorTree::BlackboardAsset.
  */
 UCLASS()
 class UEAGENTFORGE_API UAgentForgeLibrary : public UBlueprintFunctionLibrary
@@ -202,6 +210,11 @@ private:
 
 	// ─── Scene setup ──────────────────────────────────────────────────────────
 	static FString Cmd_SetupTestLevel(const TSharedPtr<FJsonObject>& Args);
+
+	// ─── AI asset wiring ──────────────────────────────────────────────────────
+	// set_bt_blackboard: links a BlackboardData asset to a BehaviorTree via C++
+	// (bypasses Python CPF_Protected restriction on BehaviorTree::BlackboardAsset)
+	static FString Cmd_SetBtBlackboard(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── Shared utilities ─────────────────────────────────────────────────────
 	static bool            ParseJsonObject(const FString& In, TSharedPtr<FJsonObject>& OutObj, FString& OutErr);

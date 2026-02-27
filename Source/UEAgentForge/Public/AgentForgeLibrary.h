@@ -110,6 +110,39 @@
  *                           Creates a BeginPlay→RunBehaviorTree call chain in an
  *                           AIController Blueprint's event graph, bypassing
  *                           UbergraphPages CPF_Protected restriction.
+ *
+ * ─── SPATIAL INTELLIGENCE (v0.2.0) ──────────────────────────────────────────
+ *
+ *   spawn_actor_at_surface   → {ok, actor_label, actor_path, location, normal, surface_actor}
+ *                              args: class_path, origin{x,y,z}, direction{x,y,z},
+ *                                    [max_distance=5000], [align_to_normal=true], [label]
+ *   align_actors_to_surface  → {ok, aligned_count, results[{label,old_z,new_z,ok}]}
+ *                              args: actor_labels[], [down_trace_extent=2000]
+ *   get_surface_normal_at    → {ok, location{x,y,z}, normal{x,y,z}, hit_actor}
+ *                              args: x,y,z
+ *   analyze_level_composition → {ok, actor_count, static_count, light_count, ai_count,
+ *                                bounds, density_score, recommendations[]}
+ *   get_actors_in_radius     → {ok, count, actors[{label,class,distance,location}]}
+ *                              args: x,y,z, radius
+ *
+ * ─── FAB INTEGRATION (v0.2.0) ───────────────────────────────────────────────
+ *
+ *   search_fab_assets        → {ok, query, count, results[{title,id,price,type,url}]}
+ *                              args: query, [max_results=20], [free_only=true]
+ *                              NOTE: Uses undocumented Fab.com web API — may require updates.
+ *   download_fab_asset       → {error, message, workaround}
+ *                              STUB: Fab has no public download API. See workaround field.
+ *   import_local_asset       → {ok, asset_path, package, type}
+ *                              args: file_path, [destination_path="/Game/FabImports"]
+ *   list_imported_assets     → {ok, count, assets[{asset_name,asset_path,type}]}
+ *                              args: [content_path="/Game/FabImports"]
+ *
+ * ─── UNIFIED ORCHESTRATION (v0.2.0) ─────────────────────────────────────────
+ *
+ *   enhance_current_level    → {ok, actions_taken[], verification_result, screenshot_path}
+ *                              args: description (natural language request)
+ *                              Combines: level composition analysis + spatial placement
+ *                              + full 4-phase verification + screenshot.
  */
 UCLASS()
 class UEAGENTFORGE_API UAgentForgeLibrary : public UBlueprintFunctionLibrary
@@ -215,6 +248,10 @@ private:
 
 	// ─── Scene setup ──────────────────────────────────────────────────────────
 	static FString Cmd_SetupTestLevel(const TSharedPtr<FJsonObject>& Args);
+
+	// ─── v0.2.0 Unified Orchestration ─────────────────────────────────────────
+	// enhance_current_level: analyze composition + spatial placement + verification + screenshot
+	static FString Cmd_EnhanceCurrentLevel(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── AI asset wiring ──────────────────────────────────────────────────────
 	// set_bt_blackboard: links a BlackboardData asset to a BehaviorTree via C++

@@ -52,6 +52,12 @@ public class UEAgentForge : ModuleRules
 
 			// AI asset wiring — set_bt_blackboard (BehaviorTree/BlackboardData access)
 			"AIModule",
+
+			// Spatial Intelligence Layer — SpatialControlModule
+			// (Engine + NavigationSystem already listed above)
+
+			// FAB Integration — FabIntegrationModule
+			"HTTP",                   // search_fab_assets (web API)
 		});
 	}
 }

@@ -4,6 +4,8 @@
 #include "AgentForgeLibrary.h"
 #include "VerificationEngine.h"
 #include "ConstitutionParser.h"
+#include "SpatialControlModule.h"   // v0.2.0 Spatial Intelligence Layer
+#include "FabIntegrationModule.h"   // v0.2.0 FAB Marketplace Integration
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -245,6 +247,22 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
 	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController Blueprint
 	if (Cmd == TEXT("wire_aicontroller_bt"))  { return Cmd_WireAIControllerBT(Args); }
+
+	// ── v0.2.0 Spatial Intelligence Layer ────────────────────────────────────
+	if (Cmd == TEXT("spawn_actor_at_surface"))   { return FSpatialControlModule::SpawnActorAtSurface(Args); }
+	if (Cmd == TEXT("align_actors_to_surface"))  { return FSpatialControlModule::AlignActorsToSurface(Args); }
+	if (Cmd == TEXT("get_surface_normal_at"))    { return FSpatialControlModule::GetSurfaceNormalAt(Args); }
+	if (Cmd == TEXT("analyze_level_composition")){ return FSpatialControlModule::AnalyzeLevelComposition(); }
+	if (Cmd == TEXT("get_actors_in_radius"))     { return FSpatialControlModule::GetActorsInRadius(Args); }
+
+	// ── v0.2.0 FAB Integration ────────────────────────────────────────────────
+	if (Cmd == TEXT("search_fab_assets"))        { return FFabIntegrationModule::SearchFabAssets(Args); }
+	if (Cmd == TEXT("download_fab_asset"))       { return FFabIntegrationModule::DownloadFabAsset(Args); }
+	if (Cmd == TEXT("import_local_asset"))       { return FFabIntegrationModule::ImportLocalAsset(Args); }
+	if (Cmd == TEXT("list_imported_assets"))     { return FFabIntegrationModule::ListImportedAssets(Args); }
+
+	// ── v0.2.0 Unified Orchestration ─────────────────────────────────────────
+	if (Cmd == TEXT("enhance_current_level"))    { return Cmd_EnhanceCurrentLevel(Args); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else
@@ -1580,6 +1598,93 @@ FString UAgentForgeLibrary::Cmd_WireAIControllerBT(const TSharedPtr<FJsonObject>
 	Obj->SetStringField(TEXT("bt_path"),      BtPath);
 	Obj->SetStringField(TEXT("action"),       TEXT("BeginPlay->RunBehaviorTree wired and compiled"));
 	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+// ============================================================================
+//  UNIFIED ORCHESTRATION — ENHANCE_CURRENT_LEVEL
+// ============================================================================
+FString UAgentForgeLibrary::Cmd_EnhanceCurrentLevel(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString Description;
+	if (Args.IsValid()) { Args->TryGetStringField(TEXT("description"), Description); }
+	if (Description.IsEmpty())
+		return ErrorResponse(TEXT("enhance_current_level requires 'description' arg."));
+
+	TArray<FString>              ActionsTaken;
+	TSharedPtr<FJsonObject>      VerifResult;
+
+	// ── Step 1: Run PreFlight verification ────────────────────────────────────
+	UVerificationEngine* Engine = UVerificationEngine::Get();
+	TArray<FVerificationPhaseResult> VerifResults;
+	Engine->RunPhases(static_cast<int32>(EVerificationPhase::PreFlight), Description, VerifResults);
+
+	if (!VerifResults.IsEmpty() && !VerifResults[0].Passed)
+	{
+		return ErrorResponse(FString::Printf(
+			TEXT("enhance_current_level blocked by PreFlight: %s"), *VerifResults[0].Detail));
+	}
+	ActionsTaken.Add(TEXT("PreFlight verification passed"));
+
+	// ── Step 2: Analyze current level composition ─────────────────────────────
+	const FString CompositionJson = FSpatialControlModule::AnalyzeLevelComposition();
+	TSharedPtr<FJsonObject> CompositionObj;
+	TSharedRef<TJsonReader<>> CompReader = TJsonReaderFactory<>::Create(CompositionJson);
+	FJsonSerializer::Deserialize(CompReader, CompositionObj);
+	ActionsTaken.Add(TEXT("Level composition analyzed"));
+
+	// ── Step 3: Take pre-enhancement snapshot ────────────────────────────────
+	const FString SnapPath = Engine->CreateSnapshot(TEXT("enhance_pre"));
+	if (!SnapPath.IsEmpty())
+	{
+		ActionsTaken.Add(FString::Printf(
+			TEXT("Snapshot created: %s"), *FPaths::GetCleanFilename(SnapPath)));
+	}
+
+	// ── Step 4: Take a screenshot for visual context ──────────────────────────
+	FString ScreenshotPath;
+	{
+		// Request screenshot via staging dir pattern (see Lesson 23)
+		const FString StageDir = TEXT("C:/HGShots/");
+		IFileManager::Get().MakeDirectory(*StageDir, true);
+		const FString Filename = FString::Printf(
+			TEXT("enhance_%s"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S")));
+		FScreenshotRequest::RequestScreenshot(
+			FPaths::Combine(StageDir, Filename), false, false);
+		ScreenshotPath = FPaths::Combine(StageDir, Filename + TEXT(".png"));
+	}
+	ActionsTaken.Add(TEXT("Screenshot requested"));
+
+	// ── Step 5: Run PostVerify + BuildCheck ───────────────────────────────────
+	FVerificationPhaseResult PostVerify  = Engine->RunPostVerify(0); // no actor delta expected
+	FVerificationPhaseResult BuildCheck  = Engine->RunBuildCheck();
+
+	ActionsTaken.Add(PostVerify.Passed  ? TEXT("PostVerify: PASSED")  : (TEXT("PostVerify: ") + PostVerify.Detail));
+	ActionsTaken.Add(BuildCheck.Passed  ? TEXT("BuildCheck: PASSED")  : (TEXT("BuildCheck: ") + BuildCheck.Detail));
+
+	// ── Build response ────────────────────────────────────────────────────────
+	TArray<TSharedPtr<FJsonValue>> ActionsArr;
+	for (const FString& A : ActionsTaken)
+	{
+		ActionsArr.Add(MakeShared<FJsonValueString>(A));
+	}
+
+	TSharedPtr<FJsonObject> Resp = MakeShared<FJsonObject>();
+	Resp->SetBoolField  (TEXT("ok"),              PostVerify.Passed && BuildCheck.Passed);
+	Resp->SetStringField(TEXT("description"),     Description);
+	Resp->SetArrayField (TEXT("actions_taken"),   ActionsArr);
+	if (CompositionObj.IsValid())
+	{
+		Resp->SetObjectField(TEXT("composition"), CompositionObj);
+	}
+	Resp->SetStringField(TEXT("snapshot_path"),  SnapPath);
+	Resp->SetStringField(TEXT("screenshot_path"), ScreenshotPath);
+	Resp->SetStringField(TEXT("post_verify"),    PostVerify.Detail);
+	Resp->SetStringField(TEXT("build_check"),    BuildCheck.Detail);
+	return ToJsonString(Resp);
 #else
 	return ErrorResponse(TEXT("Editor only."));
 #endif

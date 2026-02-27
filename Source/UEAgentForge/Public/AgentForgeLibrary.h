@@ -105,6 +105,11 @@
  *                           Links a BlackboardData asset to a BehaviorTree via C++,
  *                           bypassing Python's CPF_Protected restriction on
  *                           BehaviorTree::BlackboardAsset.
+ *   wire_aicontroller_bt  → {ok, aicontroller, bt_path, action}
+ *                           args: aicontroller_path, bt_path
+ *                           Creates a BeginPlay→RunBehaviorTree call chain in an
+ *                           AIController Blueprint's event graph, bypassing
+ *                           UbergraphPages CPF_Protected restriction.
  */
 UCLASS()
 class UEAGENTFORGE_API UAgentForgeLibrary : public UBlueprintFunctionLibrary
@@ -215,6 +220,9 @@ private:
 	// set_bt_blackboard: links a BlackboardData asset to a BehaviorTree via C++
 	// (bypasses Python CPF_Protected restriction on BehaviorTree::BlackboardAsset)
 	static FString Cmd_SetBtBlackboard(const TSharedPtr<FJsonObject>& Args);
+	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController BP
+	// (bypasses UbergraphPages CPF_Protected restriction)
+	static FString Cmd_WireAIControllerBT(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── Shared utilities ─────────────────────────────────────────────────────
 	static bool            ParseJsonObject(const FString& In, TSharedPtr<FJsonObject>& OutObj, FString& OutErr);

@@ -62,6 +62,9 @@
 // AI asset wiring — set_bt_blackboard bypasses Python CPF_Protected restriction
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardData.h"
+// wire_aicontroller_bt — blueprint graph node creation
+#include "AIController.h"
+#include "EdGraphSchema_K2.h"
 #endif
 
 // ============================================================================
@@ -240,6 +243,8 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("get_forge_status"))      { return Cmd_GetForgeStatus(); }
 	if (Cmd == TEXT("set_viewport_camera"))   { return Cmd_SetViewportCamera(Args); }
 	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
+	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController Blueprint
+	if (Cmd == TEXT("wire_aicontroller_bt"))  { return Cmd_WireAIControllerBT(Args); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else
@@ -1474,6 +1479,106 @@ FString UAgentForgeLibrary::Cmd_SetBtBlackboard(const TSharedPtr<FJsonObject>& A
 	Obj->SetBoolField  (TEXT("ok"),      true);
 	Obj->SetStringField(TEXT("bt_path"), BtPath);
 	Obj->SetStringField(TEXT("bb_path"), BbPath);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+// ============================================================================
+//  WIRE AICONTROLLER → BEHAVIOR TREE
+// ============================================================================
+FString UAgentForgeLibrary::Cmd_WireAIControllerBT(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	// args: { "aicontroller_path": "/Game/.../BP_WardenAIController",
+	//         "bt_path":           "/Game/.../BT_Warden" }
+	FString AICtrlPath, BtPath;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("aicontroller_path"), AICtrlPath))
+		return ErrorResponse(TEXT("wire_aicontroller_bt requires 'aicontroller_path' arg."));
+	if (!Args->TryGetStringField(TEXT("bt_path"), BtPath))
+		return ErrorResponse(TEXT("wire_aicontroller_bt requires 'bt_path' arg."));
+
+	UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *AICtrlPath);
+	if (!BP) return ErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *AICtrlPath));
+
+	UBehaviorTree* BT = Cast<UBehaviorTree>(
+		StaticLoadObject(UBehaviorTree::StaticClass(), nullptr, *BtPath));
+	if (!BT) return ErrorResponse(FString::Printf(TEXT("BehaviorTree not found: %s"), *BtPath));
+
+	if (!BP->UbergraphPages.Num())
+		return ErrorResponse(TEXT("Blueprint has no event graph."));
+
+	UEdGraph* EventGraph = BP->UbergraphPages[0];
+
+	// ── Find or create a BeginPlay event node ────────────────────────────────
+	UK2Node_Event* BeginPlayNode = nullptr;
+	for (UEdGraphNode* Node : EventGraph->Nodes)
+	{
+		UK2Node_Event* Ev = Cast<UK2Node_Event>(Node);
+		if (Ev && Ev->EventReference.GetMemberName() == FName("ReceiveBeginPlay"))
+		{
+			BeginPlayNode = Ev;
+			break;
+		}
+	}
+	if (!BeginPlayNode)
+	{
+		BeginPlayNode = NewObject<UK2Node_Event>(EventGraph);
+		UFunction* BeginPlayFunc = AActor::StaticClass()->FindFunctionByName(FName("ReceiveBeginPlay"));
+		if (BeginPlayFunc)
+		{
+			BeginPlayNode->EventReference.SetFromField<UFunction>(BeginPlayFunc, false);
+			BeginPlayNode->bOverrideFunction = true;
+		}
+		EventGraph->AddNode(BeginPlayNode, false, false);
+		BeginPlayNode->CreateNewGuid();
+		BeginPlayNode->PostPlacedNewNode();
+		BeginPlayNode->NodePosX = 0;
+		BeginPlayNode->NodePosY = 0;
+		BeginPlayNode->AllocateDefaultPins();
+	}
+
+	// ── Create RunBehaviorTree call node ─────────────────────────────────────
+	UK2Node_CallFunction* RunBTNode = NewObject<UK2Node_CallFunction>(EventGraph);
+	UFunction* RunBTFunc = AAIController::StaticClass()->FindFunctionByName(FName("RunBehaviorTree"));
+	if (!RunBTFunc)
+		return ErrorResponse(TEXT("RunBehaviorTree not found on AAIController."));
+
+	RunBTNode->FunctionReference.SetFromField<UFunction>(RunBTFunc, false);
+	EventGraph->AddNode(RunBTNode, false, false);
+	RunBTNode->CreateNewGuid();
+	RunBTNode->PostPlacedNewNode();
+	RunBTNode->NodePosX = BeginPlayNode->NodePosX + 400;
+	RunBTNode->NodePosY = BeginPlayNode->NodePosY;
+	RunBTNode->AllocateDefaultPins();
+
+	// ── Wire execution: BeginPlay.Then → RunBT.Execute ───────────────────────
+	const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+	UEdGraphPin* BeginPlayThenPin = BeginPlayNode->FindPin(UEdGraphSchema_K2::PN_Then);
+	UEdGraphPin* RunBTExecPin     = RunBTNode->FindPin(UEdGraphSchema_K2::PN_Execute);
+	if (BeginPlayThenPin && RunBTExecPin)
+	{
+		Schema->TryCreateConnection(BeginPlayThenPin, RunBTExecPin);
+	}
+
+	// ── Set BTAsset pin default object ───────────────────────────────────────
+	UEdGraphPin* BTAssetPin = RunBTNode->FindPin(FName("BTAsset"));
+	if (BTAssetPin)
+	{
+		BTAssetPin->DefaultObject = BT;
+	}
+
+	// ── Compile and save ─────────────────────────────────────────────────────
+	BP->Modify();
+	FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::None);
+	SaveNewPackage(BP->GetOutermost(), BP);
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField  (TEXT("ok"),           true);
+	Obj->SetStringField(TEXT("aicontroller"), AICtrlPath);
+	Obj->SetStringField(TEXT("bt_path"),      BtPath);
+	Obj->SetStringField(TEXT("action"),       TEXT("BeginPlay->RunBehaviorTree wired and compiled"));
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));

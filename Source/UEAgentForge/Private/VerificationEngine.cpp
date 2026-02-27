@@ -18,6 +18,7 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Blueprint.h"
+#include "ScopedTransaction.h"        // FScopedTransaction — explicit with NoPCHs
 #endif
 
 UVerificationEngine* UVerificationEngine::Singleton = nullptr;

@@ -223,6 +223,61 @@ class AgentForgeClient:
     def take_screenshot(self, filename: str = "forge_screenshot") -> ForgeResult:
         return self.execute("take_screenshot", {"filename": filename})
 
+    def redraw_viewports(self) -> ForgeResult:
+        """Force all editor viewports to redraw. Call before take_screenshot when the
+        viewport may be idle (no user interaction), otherwise FScreenshotRequest has no
+        rendered frame to capture."""
+        return self.execute("redraw_viewports")
+
+    def set_viewport_camera(
+        self,
+        x: float = 0.0, y: float = 0.0, z: float = 170.0,
+        pitch: float = 0.0, yaw: float = 0.0, roll: float = 0.0,
+    ) -> ForgeResult:
+        """Move the first perspective viewport camera to the given world location and rotation.
+        Useful for framing a shot before calling take_screenshot.
+
+        Args:
+            x, y, z:           World-space location in cm.
+            pitch, yaw, roll:  Camera rotation in degrees.
+        """
+        return self.execute("set_viewport_camera", {
+            "x": x, "y": y, "z": z,
+            "pitch": pitch, "yaw": yaw, "roll": roll,
+        })
+
+    def take_focused_screenshot(
+        self,
+        filename: str = "forge_screenshot",
+        x: Optional[float] = None, y: Optional[float] = None, z: Optional[float] = None,
+        pitch: Optional[float] = None, yaw: Optional[float] = None, roll: Optional[float] = None,
+    ) -> ForgeResult:
+        """Convenience wrapper: optionally reposition the viewport camera, force a redraw,
+        then request a screenshot.
+
+        If x/y/z are provided the camera is moved first. Always calls redraw_viewports
+        before take_screenshot so FScreenshotRequest has a rendered frame to capture.
+
+        Note: The screenshot file is written on the next rendered frame. The returned path
+        is valid immediately but the file itself may not exist for 1-2 frames (~50 ms).
+
+        Example::
+
+            result = client.take_focused_screenshot(
+                filename="level_overview",
+                x=0, y=0, z=5000,
+                pitch=-90, yaw=0, roll=0,
+            )
+            print("Screenshot queued at:", result.raw.get("path"))
+        """
+        if x is not None:
+            self.set_viewport_camera(
+                x=x, y=y or 0.0, z=z or 170.0,
+                pitch=pitch or 0.0, yaw=yaw or 0.0, roll=roll or 0.0,
+            )
+        self.redraw_viewports()
+        return self.execute("take_screenshot", {"filename": filename})
+
     # ── Spatial queries ────────────────────────────────────────────────────
     def cast_ray(
         self,

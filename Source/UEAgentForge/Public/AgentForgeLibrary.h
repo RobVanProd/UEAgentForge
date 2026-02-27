@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "Dom/JsonObject.h"           // FJsonObject, TSharedPtr — explicit with NoPCHs
 #include "AgentForgeLibrary.generated.h"
 
 /**
@@ -29,6 +30,9 @@
  *   get_all_level_actors  → [{name,label,class,object_path,location,rotation,scale,bounds}]
  *   get_actor_components  → [{name,class,object_path}]       args: label
  *   get_actor_bounds      → {origin,extent,box_min,box_max}  args: label
+ *   set_viewport_camera   → {ok, x,y,z, pitch,yaw,roll}
+ *                           args: x,y,z, [pitch=0,yaw=0,roll=0]
+ *   redraw_viewports      → {ok, detail}   (forces a render tick — useful before take_screenshot)
  *
  * ─── ACTOR CONTROL ──────────────────────────────────────────────────────────
  *
@@ -150,6 +154,8 @@ private:
 	static FString Cmd_GetCurrentLevel();
 	static FString Cmd_AssertCurrentLevel(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_GetActorBounds(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetViewportCamera(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_RedrawViewports();
 
 	// ─── Actor control ────────────────────────────────────────────────────────
 	static FString Cmd_SpawnActor(const TSharedPtr<FJsonObject>& Args);

@@ -4,7 +4,9 @@ public class UEAgentForge : ModuleRules
 {
 	public UEAgentForge(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		// NoPCHs: prevents LNK2011 "precompiled object not linked" during Live Coding patches.
+		// The module is small enough that per-file compilation is fast.
+		PCHUsage = PCHUsageMode.NoPCHs;
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
@@ -22,7 +24,7 @@ public class UEAgentForge : ModuleRules
 			// Asset management
 			"AssetRegistry",
 			"AssetTools",             // rename_asset, move_asset, delete_asset
-			"ObjectTools",            // delete_asset (force delete)
+			// ObjectTools is part of UnrealEd — no separate module in UE 5.7
 
 			// Screenshot capture
 			"ImageWrapper",

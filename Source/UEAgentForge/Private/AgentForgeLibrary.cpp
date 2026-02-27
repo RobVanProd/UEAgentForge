@@ -15,6 +15,7 @@
 #include "Subsystems/EditorActorSubsystem.h"
 #include "FileHelpers.h"
 #include "LevelEditorViewport.h"
+#include "UnrealClient.h"   // FScreenshotRequest — programmatic viewport screenshots
 #include "IImageWrapper.h"
 #include "IImageWrapperModule.h"
 #include "Misc/FileHelper.h"
@@ -56,6 +57,8 @@
 #include "EngineUtils.h"
 // Python scripting
 #include "IPythonScriptPlugin.h"
+// Transaction safety — explicit with NoPCHs
+#include "ScopedTransaction.h"
 #endif
 
 // ============================================================================
@@ -165,7 +168,8 @@ bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
 		TEXT("create_blueprint"), TEXT("compile_blueprint"), TEXT("set_bp_cdo_property"),
 		TEXT("edit_blueprint_node"), TEXT("create_material_instance"), TEXT("set_material_params"),
 		TEXT("rename_asset"), TEXT("move_asset"), TEXT("delete_asset"),
-		TEXT("setup_test_level"), TEXT("execute_python"),
+		TEXT("setup_test_level"),
+		// NOTE: execute_python is NOT here — it routes directly (see ExecuteCommandJson).
 	};
 	return MutatingCmds.Contains(Cmd);
 }
@@ -197,6 +201,11 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 		Args = *ArgsPtr;
 	}
 
+	// execute_python bypasses ExecuteSafeTransaction — Python scripts may perform
+	// non-undoable operations (new_level, load_level, file I/O) that break rollback
+	// verification. Route directly so the script runs once without a test phase.
+	if (Cmd == TEXT("execute_python"))  { return Cmd_ExecutePython(Args); }
+
 	// Mutating commands run inside a full safe transaction with verification.
 	if (IsMutatingCommand(Cmd))
 	{
@@ -224,6 +233,8 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("run_verification"))      { return Cmd_RunVerification(Args); }
 	if (Cmd == TEXT("enforce_constitution"))  { return Cmd_EnforceConstitution(Args); }
 	if (Cmd == TEXT("get_forge_status"))      { return Cmd_GetForgeStatus(); }
+	if (Cmd == TEXT("set_viewport_camera"))   { return Cmd_SetViewportCamera(Args); }
+	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else
@@ -287,7 +298,6 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 				else if (Cmd == TEXT("move_asset"))              { Dummy = Cmd_MoveAsset(Args); }
 				else if (Cmd == TEXT("delete_asset"))            { Dummy = Cmd_DeleteAsset(Args); }
 				else if (Cmd == TEXT("setup_test_level"))        { Dummy = Cmd_SetupTestLevel(Args); }
-				else if (Cmd == TEXT("execute_python"))          { Dummy = Cmd_ExecutePython(Args); }
 				return !Dummy.Contains(TEXT("\"error\""));
 			},
 			Cmd);
@@ -323,7 +333,6 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	else if (Cmd == TEXT("move_asset"))          { CommandResult = Cmd_MoveAsset(Args); }
 	else if (Cmd == TEXT("delete_asset"))        { CommandResult = Cmd_DeleteAsset(Args); }
 	else if (Cmd == TEXT("setup_test_level"))    { CommandResult = Cmd_SetupTestLevel(Args); }
-	else if (Cmd == TEXT("execute_python"))      { CommandResult = Cmd_ExecutePython(Args); }
 	else { CommandResult = ErrorResponse(FString::Printf(TEXT("Unrouted mutating command: %s"), *Cmd)); }
 
 	bCommandSuccess = !CommandResult.Contains(TEXT("\"error\""));
@@ -536,6 +545,53 @@ FString UAgentForgeLibrary::Cmd_GetActorBounds(const TSharedPtr<FJsonObject>& Ar
 #endif
 }
 
+FString UAgentForgeLibrary::Cmd_SetViewportCamera(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const double X = Args->HasField(TEXT("x")) ? Args->GetNumberField(TEXT("x")) : 0.0;
+	const double Y = Args->HasField(TEXT("y")) ? Args->GetNumberField(TEXT("y")) : 0.0;
+	const double Z = Args->HasField(TEXT("z")) ? Args->GetNumberField(TEXT("z")) : 170.0;
+	const double Pitch = Args->HasField(TEXT("pitch")) ? Args->GetNumberField(TEXT("pitch")) : 0.0;
+	const double Yaw   = Args->HasField(TEXT("yaw"))   ? Args->GetNumberField(TEXT("yaw"))   : 0.0;
+	const double Roll  = Args->HasField(TEXT("roll"))  ? Args->GetNumberField(TEXT("roll"))  : 0.0;
+
+	const FVector  NewLoc(X, Y, Z);
+	const FRotator NewRot(Pitch, Yaw, Roll);
+
+	for (FLevelEditorViewportClient* VC : GEditor->GetLevelViewportClients())
+	{
+		if (VC && VC->IsPerspective())
+		{
+			VC->SetViewLocation(NewLoc);
+			VC->SetViewRotation(NewRot);
+			VC->Invalidate();
+			break;   // move the first perspective viewport only
+		}
+	}
+
+	TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetNumberField(TEXT("x"), X);
+	Out->SetNumberField(TEXT("y"), Y);
+	Out->SetNumberField(TEXT("z"), Z);
+	Out->SetNumberField(TEXT("pitch"), Pitch);
+	Out->SetNumberField(TEXT("yaw"),   Yaw);
+	return ToJsonString(Out);
+#else
+	return ErrorResponse(TEXT("Editor not available"));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_RedrawViewports()
+{
+#if WITH_EDITOR
+	GEditor->RedrawAllViewports();
+	return OkResponse(TEXT("All viewports redrawn."));
+#else
+	return ErrorResponse(TEXT("Editor not available"));
+#endif
+}
+
 // ============================================================================
 //  ACTOR CONTROL
 // ============================================================================
@@ -647,18 +703,17 @@ FString UAgentForgeLibrary::Cmd_TakeScreenshot(const TSharedPtr<FJsonObject>& Ar
 	FString Filename = TEXT("AgentForge_Screenshot");
 	if (Args.IsValid()) { Args->TryGetStringField(TEXT("filename"), Filename); }
 
-	const FString Dir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("AgentForgeScreenshots"));
+	// FScreenshotRequest::RequestScreenshot — correct programmatic editor screenshot API.
+	// Saves on the next rendered frame to the exact path specified (no path-space issues).
+	// bAddFilenameSuffix=false so we control the exact filename; bShowUI=false for silent capture.
+	// Use C:/HGShots staging dir (no spaces in path — HighResShot historically breaks on spaces).
+	const FString Dir = TEXT("C:/HGShots");
 	IFileManager::Get().MakeDirectory(*Dir, true);
 	const FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
-	const FString Path = FPaths::Combine(Dir, FString::Printf(TEXT("%s_%s.png"), *Filename, *Timestamp));
+	const FString StagedName = FString::Printf(TEXT("%s_%s.png"), *Filename, *Timestamp);
+	const FString Path = FPaths::Combine(Dir, StagedName);
 
-	// Use the HighResShot console command — reliable cross-platform editor screenshot.
-	// The file is written at next render tick; Path is returned immediately for the agent.
-	if (GEditor)
-	{
-		UWorld* World = GEditor->GetEditorWorldContext().World();
-		GEditor->Exec(World, *FString::Printf(TEXT("HighResShot %s"), *Path));
-	}
+	FScreenshotRequest::RequestScreenshot(Path, /*bShowUI=*/false, /*bAddFilenameSuffix=*/false);
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),   true);

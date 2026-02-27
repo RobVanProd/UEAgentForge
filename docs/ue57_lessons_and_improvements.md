@@ -792,3 +792,71 @@ if target_hwnd:
 ```
 
 Wait ~75 seconds for compile (35 actions with UBA cache) + hot-patch injection. Even adding new module dependencies (e.g., `AIModule`) to Build.cs works via this path since UBT runs a full relink in Live Coding mode.
+
+---
+
+### Lesson 39: UbergraphPages is CPF_Protected (Python-inaccessible) — use C++ command
+
+**Problem:** Editing Blueprint event graphs from Python fails:
+```python
+bp.get_editor_property('UbergraphPages')
+# → Exception: Blueprint: Property 'UbergraphPages' is protected and cannot be read
+```
+
+**Consequence:** Cannot add BeginPlay → RunBehaviorTree nodes in Python.
+
+**Solution:** Added `wire_aicontroller_bt` C++ command (in `UEAgentForge/Source/UEAgentForge/Private/AgentForgeLibrary.cpp`).
+
+- Creates a `UK2Node_Event` (BeginPlay) and `UK2Node_CallFunction` (RunBehaviorTree) in the event graph
+- Wires execution pins via `UEdGraphSchema_K2::TryCreateConnection`
+- Sets BTAsset pin default object to the target BehaviorTree asset
+- Compiles and saves the Blueprint
+
+**Usage:**
+```json
+{
+  "cmd": "wire_aicontroller_bt",
+  "args": {
+    "aicontroller_path": "/Game/Horror/AI/BP_WardenAIController",
+    "bt_path":           "/Game/Horror/AI/BT_Warden"
+  }
+}
+```
+
+**Includes required:** `AIController.h`, `EdGraphSchema_K2.h`, `K2Node_Event.h`, `K2Node_CallFunction.h`
+(all available from existing `AIModule`, `BlueprintGraph` Build.cs dependencies)
+
+---
+
+### Lesson 40: AIControllerClass and AutoPossessAI must be set on CDO not Blueprint
+
+**Problem:** Setting `AutoPossessAI` on the Blueprint asset object fails:
+```python
+warden_bp.set_editor_property('AutoPossessAI', ...)
+# → Exception: Blueprint: Failed to find property 'AutoPossessAI' on 'Blueprint'
+```
+
+**Fix:** Both `AIControllerClass` and `AutoPossessAI` are `APawn` UPROPERTY values, not Blueprint asset properties. Set on the Class Default Object:
+```python
+cdo = unreal.get_default_object(warden_bp.generated_class())
+cdo.set_editor_property('AIControllerClass', ctrl_class)
+cdo.set_editor_property('AutoPossessAI', unreal.AutoPossessAI.PLACED_IN_WORLD_OR_SPAWNED)
+```
+
+Then compile with `unreal.BlueprintEditorLibrary.compile_blueprint(warden_bp)`.
+
+---
+
+### Lesson 41: BT graph nodes cannot be set programmatically via Python — minimal BT pattern
+
+**Context:** Creating composite BT nodes (Selector, Sequence, Task nodes) in the BT editor graph requires `UBehaviorTreeGraph`, `UBTGraphNode_*` classes — these are editor-only classes in the `BehaviorTreeEditor` module, not exposed to Python.
+
+**Practical pattern:** For AI characters with simple state machines, implement logic in the AIController rather than the BT graph:
+1. Create `BP_WardenAIController` (subclass of `AAIController`)
+2. Wire `BeginPlay → RunBehaviorTree(BT_Warden)` via `wire_aicontroller_bt` command
+3. Implement state logic via Event Tick / Timer Functions reading Blackboard keys
+4. BT_Warden's role: activates the BB_Warden Blackboard (via `RunBehaviorTree`) and serves as the runtime context
+
+**Benefit:** This approach is fully programmable via Python + `wire_aicontroller_bt`, avoids BT graph editing complexity, and is idiomatic UE for simple AI controllers.
+
+**If BT graph editing is truly needed:** Add a `BehaviorTreeEditor` module dependency and use `FBehaviorTreeEditorUtils` or `UBehaviorTreeGraph::AddNode()` from a custom C++ command. This is complex but feasible via the same C++ bypass pattern.

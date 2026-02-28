@@ -6,7 +6,7 @@
 
 **The first free, open-source, enterprise-grade AI agent control bridge for Unreal Engine 5.**
 
-UEAgentForge evolves the pattern of basic Remote Control API wrappers into a production-standard framework with unbreakable transaction safety, 4-phase verification, constitution-enforced project governance, and — from v0.3.0 — a closed-loop reasoning engine that lets AI agents observe, analyze, plan, and act on your level autonomously.
+UEAgentForge evolves the pattern of basic Remote Control API wrappers into a production-standard framework with unbreakable transaction safety, 4-phase verification, constitution-enforced project governance, a closed-loop OAPA reasoning engine (v0.3.0), and — from v0.4.0 — a professional 5-phase AAA level generation pipeline with named presets, quality scoring, and a closed-loop orchestrator that iterates until your quality threshold is met.
 
 ## Why UEAgentForge?
 
@@ -22,6 +22,8 @@ UEAgentForge evolves the pattern of basic Remote Control API wrappers into a pro
 | Environment snapshot | ✗ | ✗ | ✓ Lighting + PP + horror score |
 | Closed-loop OAPA reasoning | ✗ | ✗ | ✓ Observe→Analyze→Plan→Act→Verify |
 | Genre-aware scene enhancement | ✗ | ✗ | ✓ Horror/dark/thriller presets |
+| 5-phase AAA level pipeline | ✗ | Partial | ✓ Blockout→Whitebox→Dressing→Lighting→Living |
+| Level preset system | ✗ | ✗ | ✓ Named presets with JSON persistence |
 | Python scripting bridge | Partial | ✗ | ✓ |
 | Open source | ✓ | ✗ | ✓ MIT |
 | Free | ✓ | ✗ | ✓ |
@@ -288,6 +290,36 @@ client.undo_transaction()
 |---|---|
 | `set_bt_blackboard` | Link BlackboardData to BehaviorTree (bypasses Python CPF_Protected) |
 | `wire_aicontroller_bt` | Wire BeginPlay→RunBehaviorTree in an AIController Blueprint |
+
+### v0.4.0 — Level Preset System
+| Command | Description |
+|---|---|
+| `list_presets` | List all available preset names (built-in + custom JSON) |
+| `load_preset` | Load a named preset — args: `{ preset_name }` |
+| `save_preset` | Serialise a preset to `Content/AgentForge/Presets/<name>.json` |
+| `suggest_preset` | Analyse the current level and recommend the best preset |
+| `get_current_preset` | Return the active preset as JSON |
+
+**Built-in presets:** `Default`, `Horror`, `SciFi`, `Fantasy`, `Military`
+
+### v0.4.0 — Five-Phase AAA Level Pipeline
+Each phase is callable independently or as part of the closed-loop `generate_full_quality_level` orchestrator.
+
+| Phase | Command | What it does |
+|---|---|---|
+| I — RLD/Blockout | `create_blockout_level` | Parses mission text, generates bubble-diagram layout, places box-actor rooms + corridors, adds PlayerStart + NavMesh |
+| II — Whitebox | `convert_to_whitebox_modular` | Replaces Blockout_* actors with real modular kit meshes (snapped to grid) |
+| III — Set Dressing | `apply_set_dressing` | Scatters story-aware props inside each room, builds micro-story arrangements |
+| IV — Lighting | `apply_professional_lighting` | Places key/fill/rim lights, height fog, PP settings, optional god-ray, computes horror score |
+| V — Living Systems | `add_living_systems` | Spawns Niagara ambient particle emitters (dust, embers, steam) + AudioVolume soundscapes |
+| All Phases | `generate_full_quality_level` | Orchestrates all 5 phases; iterates IV+V until `quality_threshold` (0–1) is met |
+
+**Quality loop:** `generate_full_quality_level` re-runs Phase IV + V up to `max_iterations` times until `EvaluateLevelQuality()` exceeds the threshold. Final quality report included in response.
+
+**Python examples:**
+- `generate_blockout_only.py` — rapid Phase I prototype
+- `full_5_phase_level_pipeline.py` — complete orchestrated pipeline
+- `create_and_save_new_preset.py` — custom preset authoring
 
 ### v0.2.0 — Spatial Intelligence
 | Command | Description |

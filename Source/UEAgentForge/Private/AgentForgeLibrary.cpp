@@ -8,6 +8,8 @@
 #include "FabIntegrationModule.h"   // v0.2.0 FAB Marketplace Integration
 #include "DataAccessModule.h"       // v0.3.0 Rich Multi-Modal Data Access
 #include "SemanticCommandModule.h"  // v0.3.0 Advanced Semantic Commands
+#include "LevelPresetSystem.h"      // v0.4.0 Named Preset Storage
+#include "LevelPipelineModule.h"    // v0.4.0 Five-Phase AAA Level Pipeline
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -281,6 +283,21 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	// ── v0.3.0 Closed-Loop Reasoning & Horror Orchestration ──────────────────
 	if (Cmd == TEXT("observe_analyze_plan_act"))  { return Cmd_ObserveAnalyzePlanAct(Args); }
 	if (Cmd == TEXT("enhance_horror_scene"))      { return Cmd_EnhanceHorrorScene(Args); }
+
+	// ── v0.4.0 Level Preset System ────────────────────────────────────────────
+	if (Cmd == TEXT("load_preset"))              { return FLevelPresetSystem::LoadPreset(Args); }
+	if (Cmd == TEXT("save_preset"))              { return FLevelPresetSystem::SavePreset(Args); }
+	if (Cmd == TEXT("list_presets"))             { return FLevelPresetSystem::ListPresets(); }
+	if (Cmd == TEXT("suggest_preset"))           { return FLevelPresetSystem::SuggestPresetForProject(); }
+	if (Cmd == TEXT("get_current_preset"))       { return FLevelPresetSystem::GetCurrentPreset(); }
+
+	// ── v0.4.0 Five-Phase AAA Level Pipeline ─────────────────────────────────
+	if (Cmd == TEXT("create_blockout_level"))         { return FLevelPipelineModule::CreateBlockoutLevel(Args); }
+	if (Cmd == TEXT("convert_to_whitebox_modular"))   { return FLevelPipelineModule::ConvertToWhiteboxModular(Args); }
+	if (Cmd == TEXT("apply_set_dressing"))            { return FLevelPipelineModule::ApplySetDressingAndStorytelling(Args); }
+	if (Cmd == TEXT("apply_professional_lighting"))   { return FLevelPipelineModule::ApplyProfessionalLightingAndAtmosphere(Args); }
+	if (Cmd == TEXT("add_living_systems"))            { return FLevelPipelineModule::AddLivingSystemsAndPolish(Args); }
+	if (Cmd == TEXT("generate_full_quality_level"))   { return FLevelPipelineModule::GenerateFullQualityLevel(Args); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else

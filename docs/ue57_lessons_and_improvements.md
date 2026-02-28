@@ -860,3 +860,64 @@ Then compile with `unreal.BlueprintEditorLibrary.compile_blueprint(warden_bp)`.
 **Benefit:** This approach is fully programmable via Python + `wire_aicontroller_bt`, avoids BT graph editing complexity, and is idiomatic UE for simple AI controllers.
 
 **If BT graph editing is truly needed:** Add a `BehaviorTreeEditor` module dependency and use `FBehaviorTreeEditorUtils` or `UBehaviorTreeGraph::AddNode()` from a custom C++ command. This is complex but feasible via the same C++ bypass pattern.
+
+---
+
+### Lesson 42: Triggering Live Coding from an external process
+
+**Context:** During AI-driven development, Live Coding must be triggered from an external shell or Python script (not by the user manually pressing Ctrl+Alt+F11 in the editor).
+
+**Method 1 — execute_python console command (RECOMMENDED):**
+```python
+import unreal
+unreal.SystemLibrary.execute_console_command(None, 'LiveCoding.Compile')
+```
+This sends `LiveCoding.Compile` directly to the UE console command system. The compile starts reliably regardless of window focus state. Wait ~75-90 seconds for compile + hot-patch to complete.
+
+**Check log for success:**
+```
+LogLiveCoding: Display: Starting Live Coding compile.
+...
+LogLiveCoding: Display: Live coding succeeded
+```
+
+**Method 2 — PowerShell keybd_event (less reliable):**
+```powershell
+[Win32]::SetForegroundWindow($ueWindow)
+[Win32]::keybd_event(0x11, 0, 0, ...)  # Ctrl down
+[Win32]::keybd_event(0x12, 0, 0, ...)  # Alt down
+[Win32]::keybd_event(0x7A, 0, 0, ...)  # F11 down
+```
+This sometimes fails if the editor window doesn't have the right focus state or if a dialog is open.
+
+**Important constraint:** Live Coding only works for `.cpp` changes to existing classes. `.h` changes that add new member variables or virtual function overrides (changing class size or vtable) require a full `Build.bat` rebuild and editor restart.
+
+---
+
+### Lesson 43: Adding SpotLight to player without SubobjectDataSubsystem (no .h change needed)
+
+**Context:** Adding a `USpotLightComponent` via `SubobjectDataSubsystem.add_new_subobject()` with `handles[0]` crashes UE 5.7 — handles[0] is the CDO, and calling `RerunConstructionScripts` on a CDO triggers a fatal assert in `ActorConstruction.cpp:261`.
+
+**Solution:** Lazy-initialize the `USpotLightComponent` inside `TickComponent()` with no `.h` file changes:
+
+```cpp
+// In UFlashlightBatteryComponent::TickComponent()
+AActor* Owner = GetOwner();
+if (Owner && !Owner->FindComponentByClass<USpotLightComponent>())
+{
+    USpotLightComponent* Spot = NewObject<USpotLightComponent>(Owner, TEXT("FlashlightSpot"));
+    Spot->SetMobility(EComponentMobility::Movable);
+    Spot->RegisterComponent();
+    UCameraComponent* Cam = Owner->FindComponentByClass<UCameraComponent>();
+    USceneComponent* AttachTarget = Cam ? Cast<USceneComponent>(Cam) : Owner->GetRootComponent();
+    Spot->AttachToComponent(AttachTarget, FAttachmentTransformRules::KeepRelativeTransform);
+    Spot->SetIntensity(8000.f);
+    Spot->SetAttenuationRadius(2500.f);
+    // ... set up spotlight properties
+    SetFlashlightOn(true);
+}
+```
+
+**Key design:** `PrimaryComponentTick.bStartWithTickEnabled = true` so the first tick runs on BeginPlay. The spotlight is found subsequently via `FindComponentByClass<USpotLightComponent>()`. This entire approach requires **only `.cpp` changes** — fully Live Coding compatible.
+
+**Do NOT store the spotlight pointer as a member variable:** Doing so adds a pointer to the class layout (changing sizeof), which prevents Live Coding from patching the class.

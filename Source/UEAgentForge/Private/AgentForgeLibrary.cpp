@@ -1241,7 +1241,7 @@ FString UAgentForgeLibrary::Cmd_BeginTransaction(const TSharedPtr<FJsonObject>& 
 FString UAgentForgeLibrary::Cmd_EndTransaction()
 {
 #if WITH_EDITOR
-	const int32 OpsCount = GEditor ? GEditor->Trans->GetQueueLength() : 0;
+	const int32 OpsCount = 0; // GEditor->Trans->GetQueueLength() inaccessible in UE 5.7 (UTransactor forward-decl only)
 	GOpenTransaction.Reset(); // commits the transaction
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),        true);

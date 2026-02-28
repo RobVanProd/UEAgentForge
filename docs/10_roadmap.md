@@ -1,8 +1,6 @@
 # Roadmap
 
-## v0.1.0 — Foundation (current)
-
-**Status:** Complete
+## v0.1.0 — Foundation ✅ Complete
 
 - [x] Core plugin structure (`UAgentForgeLibrary`, `UVerificationEngine`, `UConstitutionParser`)
 - [x] 30+ commands: observation, actor control, spatial queries, Blueprint manipulation, material instancing, content management, transaction safety, Python scripting, performance profiling, scene setup
@@ -13,47 +11,57 @@
 - [x] Full documentation (9 docs + README)
 - [x] MIT license
 
-## v0.2.0 — Blueprint Graph Control
+## v0.2.0 — Spatial Intelligence + FAB Integration ✅ Complete
 
-**Target:** Q2 2026
+- [x] `spawn_actor_at_surface` — raycast + surface-normal-aligned spawn
+- [x] `align_actors_to_surface` — drop actors to nearest surface
+- [x] `get_surface_normal_at` — surface normal query for AI placement
+- [x] `analyze_level_composition` — actor density, bounding box, AI recommendations
+- [x] `get_actors_in_radius` — sphere search sorted by distance
+- [x] `search_fab_assets` — Fab.com web search (free-only default, synchronous HTTP)
+- [x] `download_fab_asset` — stub with workaround docs (no public Fab API)
+- [x] `import_local_asset` — import FBX/OBJ/PNG/WAV from disk via AssetTools
+- [x] `list_imported_assets` — list assets in any Content Browser folder
+- [x] `enhance_current_level` — natural language → orchestrated multi-command improvement loop
+- [x] HTTP + AudioEditor module dependencies added
+- [x] 3 Python example scripts
 
-The biggest gap in current UE5 AI bridges is node-level Blueprint graph editing. v0.2.0 focuses here.
+## v0.3.0 — Advanced Intelligence & Horror Optimization ✅ Complete
 
-- [ ] `create_blueprint_node` — spawn any UK2Node type at a given position in the graph
-- [ ] `connect_blueprint_pins` — wire two node pins together
-- [ ] `get_blueprint_graph` — return full node/pin graph as JSON (for agent context)
-- [ ] `delete_blueprint_node` — remove a node and clean up connections
-- [ ] `set_actor_property` — set any UPROPERTY on any actor by name + type
-- [ ] `get_actor_property` — read any UPROPERTY value by name
-- [ ] ConstitutionParser severity levels: `[WARN]` prefix = non-blocking
-- [ ] Automated integration test suite (pytest against a running editor instance)
+- [x] `get_multi_view_capture` — capture scene from multiple angles
+- [x] `get_level_hierarchy` — full actor hierarchy with parent-child trees
+- [x] `get_deep_properties` — nested component property inspection
+- [x] `get_semantic_env_snapshot` — rich LLM-ready scene description
+- [x] `place_asset_thematically` — genre-aware placement (horror/sci-fi/fantasy)
+- [x] `refine_level_section` — spatial region improvement loop
+- [x] `apply_genre_rules` — full-level genre rule application
+- [x] `create_in_editor_asset` — factory-based in-editor asset creation
+- [x] `observe_analyze_plan_act` — full Observe-Analyze-Plan-Act loop
+- [x] `enhance_horror_scene` — closed-loop horror tension pipeline
+- [x] `set_bt_blackboard` — links BlackboardData to BehaviorTree (bypasses Python CPF_Protected)
+- [x] `wire_aicontroller_bt` — wires BeginPlay→RunBehaviorTree in AIController (bypasses UbergraphPages)
 
-## v0.3.0 — Content Pipeline
+## v0.4.0 — Professional Quality Level Generation Pipeline ✅ Complete
 
-**Target:** Q3 2026
+Released: February 2026
 
-- [ ] `import_asset` — import a file (FBX, PNG, WAV) from disk into the Content Browser
-- [ ] `export_asset` — export a content browser asset to disk
-- [ ] `create_texture` — create a UTexture2D from raw pixel data or a file
-- [ ] `create_static_mesh` — procedurally create a `UStaticMesh` via GeometryScripting
-- [ ] `set_actor_material` — assign a material to an actor's mesh component by slot index
-- [ ] `create_sound_cue` — create a basic USoundCue asset
-- [ ] Niagara: `spawn_niagara_system`, `set_niagara_parameter`
-- [ ] Bulk content operations: `rename_assets_bulk`, `delete_assets_bulk`
-
-## v0.4.0 — Level Streaming & World Partition
-
-**Target:** Q4 2026
-
-- [ ] World Partition support: `load_cell`, `unload_cell`, `get_loaded_cells`
-- [ ] Level streaming: `load_sublevel`, `unload_sublevel`, `get_sublevels`
-- [ ] `get_world_bounds` — AABB of the entire loaded world
-- [ ] `teleport_player` — move the player pawn (runtime use case)
-- [ ] Landscape: `get_landscape_heightmap`, `paint_landscape_layer`
+- [x] `list_presets` — list all named level presets (5 built-in: Default/Horror/SciFi/Fantasy/Military)
+- [x] `load_preset` — apply preset settings to current level
+- [x] `save_preset` — save current configuration as a named preset (JSON persistence)
+- [x] `suggest_preset` — AI-driven preset recommendation based on project content
+- [x] `get_current_preset` — retrieve active preset metadata
+- [x] `create_blockout_level` — Phase I: blockout geometry generation
+- [x] `convert_to_whitebox_modular` — Phase II: modular static mesh replacement
+- [x] `apply_set_dressing` — Phase III: storytelling props and environmental detail
+- [x] `apply_professional_lighting` — Phase IV: atmosphere, lighting, post-process
+- [x] `add_living_systems` — Phase V: NavMesh, AI spawns, particles, audio volumes
+- [x] `generate_full_quality_level` — master command: all 5 phases + quality-scoring loop
+- [x] JSON preset persistence in `Content/AgentForge/Presets/`
+- [x] 3 Python example scripts: blockout-only, full pipeline, custom preset authoring
 
 ## v0.5.0 — Multi-Agent & Collaboration
 
-**Target:** Q1 2027
+**Target:** Q3 2026
 
 - [ ] Agent identity — tag commands with an `agent_id` for multi-agent tracing
 - [ ] Command queue — submit multiple commands in one HTTP call with ordered execution
@@ -61,10 +69,12 @@ The biggest gap in current UE5 AI bridges is node-level Blueprint graph editing.
 - [ ] Constitution remote URL — load rules from a team-shared endpoint
 - [ ] Audit log — structured log of all commands with agent ID, timestamp, result
 - [ ] `lock_actor` / `unlock_actor` — prevent concurrent agent edits on the same object
+- [ ] World Partition support: `load_cell`, `unload_cell`, `get_loaded_cells`
+- [ ] Level streaming: `load_sublevel`, `unload_sublevel`, `get_sublevels`
 
 ## v1.0.0 — Production Release
 
-**Target:** Q2 2027
+**Target:** Q1 2027
 
 - [ ] Full automated test coverage (all commands tested)
 - [ ] GitHub Actions CI (builds against UE 5.5, 5.6, 5.7)

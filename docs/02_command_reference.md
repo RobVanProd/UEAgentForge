@@ -639,6 +639,326 @@ Spawn a standard set of test geometry actors (ground plane + 4 cubes) for agent 
 
 ---
 
+## Spatial Intelligence Commands (v0.2.0)
+
+### `spawn_actor_at_surface`
+Raycast downward and spawn an actor flush to the nearest surface, aligned to surface normal.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `class_path` | string | yes | — | Actor class path |
+| `x`, `y`, `z` | float | yes | — | World origin for downward raycast |
+| `offset_z` | float | no | `0` | Additional Z offset after surface snap |
+
+**Response:** `{ "ok": true, "spawned_name": "...", "surface_z": 0.0, "normal": {...} }`
+
+---
+
+### `align_actors_to_surface`
+Drop a list of actors to the nearest surface beneath each one.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `labels` | array | yes | Actor labels to align |
+
+**Response:** `{ "ok": true, "aligned": 4, "skipped": 0 }`
+
+---
+
+### `get_surface_normal_at`
+Return the surface normal at a given world point (useful for AI placement decisions).
+
+**Args:** `x`, `y`, `z` (float, required)
+
+**Response:** `{ "hit": true, "normal": {"x": 0, "y": 0, "z": 1}, "location": {...} }`
+
+---
+
+### `analyze_level_composition`
+Return an AI-readable scene analysis: actor density, bounding box, coverage gaps, and placement suggestions.
+
+**Args:** none
+
+**Response:** `{ "actor_count": 64, "bounds": {...}, "density": "medium", "suggestions": ["..."] }`
+
+---
+
+### `get_actors_in_radius`
+Find all actors within a sphere, sorted by distance.
+
+**Args:** `x`, `y`, `z`, `radius` (float, required)
+
+**Response:** `{ "actors": [{"label": "...", "distance": 150.0}, ...] }`
+
+---
+
+## FAB Marketplace Commands (v0.2.0)
+
+### `search_fab_assets`
+Search Fab.com for assets matching a query. Uses Fab's internal JSON API (undocumented, may change).
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `query` | string | yes | — | Search terms |
+| `max_results` | int | no | `20` | Max results (capped at 50) |
+| `free_only` | bool | no | `true` | Filter to free assets only |
+
+**Response:** `{ "ok": true, "count": 5, "results": [{"title": "...", "id": "...", "price": 0, "url": "..."}] }`
+
+---
+
+### `download_fab_asset`
+**Stub** — Fab.com has no public download API. Returns workaround instructions for using the EGL or the in-editor Fab plugin.
+
+---
+
+### `import_local_asset`
+Import a file from disk into the Content Browser. Supports FBX, OBJ, PNG, JPG, TGA, BMP, EXR, WAV.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `file_path` | string | yes | — | Absolute path to the file |
+| `destination_path` | string | no | `/Game/FabImports` | Target content folder |
+
+**Response:** `{ "ok": true, "asset_path": "/Game/FabImports/MyMesh", "type": "StaticMesh", "imported_count": 1 }`
+
+---
+
+### `list_imported_assets`
+List all assets in a content folder (recursive).
+
+**Args:** `content_path` (string, default `/Game/FabImports`)
+
+**Response:** `{ "ok": true, "count": 3, "assets": [{"asset_name": "...", "asset_path": "...", "type": "..."}] }`
+
+---
+
+### `enhance_current_level` (v0.2.0)
+Natural language → composition analysis + snapshot + constitution verify + screenshot. Orchestrates multiple commands in sequence.
+
+**Args:** `instruction` (string, required) — e.g. `"Make this level feel more like a horror dungeon"`
+
+---
+
+## Advanced Intelligence Commands (v0.3.0)
+
+### `get_multi_view_capture`
+Capture the scene from multiple camera angles simultaneously and return metadata for each view.
+
+**Args:** `angles` (array of `{pitch, yaw}`, optional), `resolution` (object, optional)
+
+---
+
+### `get_level_hierarchy`
+Return the full actor hierarchy of the current level, including parent-child relationships and component trees.
+
+**Args:** none
+
+---
+
+### `get_deep_properties`
+Fetch detailed property values from an actor, including nested component properties.
+
+**Args:** `label` (string, required)
+
+---
+
+### `get_semantic_env_snapshot`
+Return a rich semantic description of the current level — actor roles, spatial layout, lighting mood, AI nav coverage — formatted for LLM context.
+
+**Args:** none
+
+---
+
+### `place_asset_thematically`
+Place an asset class using genre-aware rules (horror, sci-fi, fantasy etc.) — chooses location, scale, and rotation based on existing level context.
+
+**Args:** `class_path` (string), `theme` (string), optional position hints
+
+---
+
+### `refine_level_section`
+Analyze a spatial region and improve it — adds props, adjusts lighting, removes clutter — based on genre rules.
+
+**Args:** `center` (`{x,y,z}`), `radius` (float), `goal` (string)
+
+---
+
+### `apply_genre_rules`
+Apply a set of named genre rules (e.g. `"horror"`) to the entire level — adjusts lighting color, fog density, prop density, and atmosphere.
+
+**Args:** `genre` (string: `horror`, `sci_fi`, `fantasy`, `military`, `default`)
+
+---
+
+### `create_in_editor_asset`
+Create a new content browser asset of a given class type using editor factories.
+
+**Args:** `class_path` (string), `asset_name` (string), `output_path` (string)
+
+---
+
+### `observe_analyze_plan_act`
+Full Observe-Analyze-Plan-Act loop. Takes a high-level goal, analyzes the scene, plans a sequence of commands, and executes them with verification.
+
+**Args:** `goal` (string, required) — e.g. `"Add atmospheric candles along the left wall"`
+
+---
+
+### `enhance_horror_scene`
+Specialized closed-loop pipeline for horror game levels: analyzes tension, shadow coverage, escape routes, and applies targeted improvements.
+
+**Args:** `target_area` (string, optional), `intensity` (float 0..1, optional)
+
+---
+
+### `set_bt_blackboard`
+Link a BlackboardData asset to a BehaviorTree asset. Bypasses the Python `CPF_Protected` restriction on `BehaviorTree.BlackboardAsset`.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `bt_path` | string | yes | BehaviorTree asset path |
+| `bb_path` | string | yes | BlackboardData asset path |
+
+---
+
+### `wire_aicontroller_bt`
+Wire `BeginPlay → RunBehaviorTree(BT)` in an AIController Blueprint event graph. Bypasses the Python `CPF_Protected` restriction on `UbergraphPages`.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `controller_path` | string | yes | AIController Blueprint path |
+| `bt_path` | string | yes | BehaviorTree asset path |
+
+---
+
+## Level Preset System (v0.4.0)
+
+### `list_presets`
+List all available named level presets (built-in + user-saved).
+
+**Args:** none
+
+**Response:**
+```json
+{
+  "ok": true,
+  "count": 5,
+  "presets": [
+    { "name": "Default",  "style": "default",  "description": "..." },
+    { "name": "Horror",   "style": "horror",   "description": "..." },
+    { "name": "SciFi",    "style": "sci_fi",   "description": "..." },
+    { "name": "Fantasy",  "style": "fantasy",  "description": "..." },
+    { "name": "Military", "style": "military", "description": "..." }
+  ]
+}
+```
+
+---
+
+### `load_preset`
+Apply a named preset's settings to the current level (lighting defaults, actor density targets, atmosphere parameters).
+
+**Args:** `name` (string, required) — e.g. `"Horror"`
+
+---
+
+### `save_preset`
+Save the current level's configuration as a named preset for future use.
+
+**Args:** `name` (string, required), `description` (string, optional)
+
+---
+
+### `suggest_preset`
+Analyze the current project's content and suggest the best matching preset.
+
+**Args:** none
+
+**Response:** `{ "suggested": "Horror", "confidence": 0.87, "reason": "..." }`
+
+---
+
+### `get_current_preset`
+Return the name and settings of the currently active preset.
+
+**Args:** none
+
+---
+
+## Five-Phase AAA Level Pipeline (v0.4.0)
+
+### `generate_full_quality_level`
+**Master command.** Runs all 5 phases in sequence with a quality-scoring loop — blockout → whitebox → set dressing → lighting → living systems. Returns a full report.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `preset` | string | no | `"Default"` | Preset to use (`Horror`, `SciFi`, `Fantasy`, etc.) |
+| `goal` | string | no | `""` | Natural language level goal |
+| `quality_target` | float | no | `0.75` | Target quality score 0..1 (loops phases until reached or max iterations hit) |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "phases_completed": 5,
+  "quality_score": 0.82,
+  "actors_spawned": 47,
+  "report": "Phase I: Blockout — 12 volumes placed. Phase II: ..."
+}
+```
+
+---
+
+### `create_blockout_level`
+**Phase I.** Generate rough blockout geometry — floor, ceiling, walls, and major volume shapes — using the active preset's spatial parameters.
+
+**Args:** `preset` (string, optional), `bounds` (`{x,y,z}` extents, optional)
+
+---
+
+### `convert_to_whitebox_modular`
+**Phase II.** Replace blockout geometry with modular static mesh pieces from the project's content library, matching surface types and junctions.
+
+**Args:** `mesh_library_path` (string, optional)
+
+---
+
+### `apply_set_dressing`
+**Phase III.** Add storytelling props, environmental details, and interactive objects based on genre rules and spatial analysis.
+
+**Args:** `theme` (string, optional), `density` (float 0..1, optional)
+
+---
+
+### `apply_professional_lighting`
+**Phase IV.** Set up atmosphere: directional light, sky light, fog, post-process volume, and accent lights appropriate for the active preset.
+
+**Args:** `preset` (string, optional), `time_of_day` (string: `day`, `dusk`, `night`)
+
+---
+
+### `add_living_systems`
+**Phase V.** Add dynamic elements: NavMesh, AI spawn points, ambient particle systems, and audio volumes to make the level feel alive.
+
+**Args:** `preset` (string, optional)
+
+---
+
 ## Error Response Format
 
 Any command that fails returns:

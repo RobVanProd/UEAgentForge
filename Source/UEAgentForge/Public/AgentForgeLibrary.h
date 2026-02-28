@@ -143,6 +143,50 @@
  *                              args: description (natural language request)
  *                              Combines: level composition analysis + spatial placement
  *                              + full 4-phase verification + screenshot.
+ *
+ * ─── DATA ACCESS LAYER (v0.3.0) ──────────────────────────────────────────────
+ *
+ *   get_multi_view_capture   → {ok, angle, note, camera:{x,y,z,pitch,yaw}, preset_angles[]}
+ *                              args: [angle="top"|"front"|"side"|"tension"],
+ *                                    [center_x,center_y,center_z], [orbit_radius=3000]
+ *   get_level_hierarchy      → {ok, actor_count, actors:[{label, class, parent, tags,
+ *                                is_visible, components[], location, bounds}]}
+ *   get_deep_properties      → {ok, label, class, property_count, properties:{name:value}}
+ *                              args: label
+ *   get_semantic_env_snapshot → {ok, lighting:{point_light_count, avg_intensity, darkness_score,
+ *                                 has_directional, has_sky_light, dominant_color},
+ *                                 post_process:{vignette, bloom, grain, exposure_compensation,
+ *                                   has_crt_blendable, fog_density},
+ *                                 density:{actor_count, static_count, light_count, ai_count,
+ *                                   density_per_m2},
+ *                                 level_bounds:{center, extent, area_m2},
+ *                                 horror_score, horror_rating}
+ *
+ * ─── SEMANTIC COMMANDS (v0.3.0) ──────────────────────────────────────────────
+ *
+ *   place_asset_thematically → {ok, placed_count, actors[{label,location}], placement_reasoning}
+ *                              args: class_path, [count=3],
+ *                                    [theme_rules:{prefer_dark, prefer_corners,
+ *                                      prefer_occluded, min_spacing}],
+ *                                    [reference_area:{x,y,z,radius}], [label_prefix]
+ *   refine_level_section     → {ok, iterations_run, actions_taken[], final_density_score, detail}
+ *                              args: [description], [target_area:{x,y,z,radius}],
+ *                                    [max_iterations=3], [class_path]
+ *   apply_genre_rules        → {ok, genre, intensity, changes_applied[], lights_modified, pp_modified}
+ *                              args: genre("horror"|"dark"|"thriller"|"neutral"), [intensity=1.0]
+ *   create_in_editor_asset   → {ok:false, message, workaround, recommended_approach}  (stub)
+ *                              args: type, description
+ *
+ * ─── CLOSED-LOOP REASONING (v0.3.0) ─────────────────────────────────────────
+ *
+ *   observe_analyze_plan_act → {ok, description, iterations[{iteration, horror_score, issues,
+ *                                plan_steps, action_results}], verification}
+ *                              args: description, [max_iterations=1], [score_target=60]
+ *                              Full OAPA loop: Observe → Analyze → Plan → Act → Verify
+ *   enhance_horror_scene     → {ok, actions_taken[], final_horror_score, screenshot_path,
+ *                                genre_result, placement_result}
+ *                              args: description, [intensity=1.0], [prop_count=5]
+ *                              One-shot horror pipeline: genre rules + thematic props + verify
  */
 UCLASS()
 class UEAGENTFORGE_API UAgentForgeLibrary : public UBlueprintFunctionLibrary
@@ -252,6 +296,17 @@ private:
 	// ─── v0.2.0 Unified Orchestration ─────────────────────────────────────────
 	// enhance_current_level: analyze composition + spatial placement + verification + screenshot
 	static FString Cmd_EnhanceCurrentLevel(const TSharedPtr<FJsonObject>& Args);
+
+	// ─── v0.3.0 Closed-Loop Reasoning ─────────────────────────────────────────
+	// observe_analyze_plan_act: full Observe→Analyze→Plan→Act→Verify loop
+	//   args: description, [max_iterations=1], [score_target=60]
+	//   returns: {ok, iterations:[{iteration, horror_score, issues, plan, results}], verification}
+	static FString Cmd_ObserveAnalyzePlanAct(const TSharedPtr<FJsonObject>& Args);
+
+	// enhance_horror_scene: one-shot horror pipeline: genre rules + thematic placement + verify + screenshot
+	//   args: description, [intensity=1.0], [prop_count=5]
+	//   returns: {ok, actions_taken[], final_horror_score, screenshot_path}
+	static FString Cmd_EnhanceHorrorScene(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── AI asset wiring ──────────────────────────────────────────────────────
 	// set_bt_blackboard: links a BlackboardData asset to a BehaviorTree via C++

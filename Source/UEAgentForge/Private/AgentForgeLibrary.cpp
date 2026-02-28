@@ -6,6 +6,8 @@
 #include "ConstitutionParser.h"
 #include "SpatialControlModule.h"   // v0.2.0 Spatial Intelligence Layer
 #include "FabIntegrationModule.h"   // v0.2.0 FAB Marketplace Integration
+#include "DataAccessModule.h"       // v0.3.0 Rich Multi-Modal Data Access
+#include "SemanticCommandModule.h"  // v0.3.0 Advanced Semantic Commands
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -263,6 +265,22 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 
 	// ── v0.2.0 Unified Orchestration ─────────────────────────────────────────
 	if (Cmd == TEXT("enhance_current_level"))    { return Cmd_EnhanceCurrentLevel(Args); }
+
+	// ── v0.3.0 Rich Multi-Modal Data Access ──────────────────────────────────
+	if (Cmd == TEXT("get_multi_view_capture"))         { return FDataAccessModule::GetMultiViewCapture(Args); }
+	if (Cmd == TEXT("get_level_hierarchy"))            { return FDataAccessModule::GetLevelHierarchy(); }
+	if (Cmd == TEXT("get_deep_properties"))            { return FDataAccessModule::GetDeepProperties(Args); }
+	if (Cmd == TEXT("get_semantic_env_snapshot"))      { return FDataAccessModule::GetSemanticEnvironmentSnapshot(); }
+
+	// ── v0.3.0 Advanced Semantic Commands ────────────────────────────────────
+	if (Cmd == TEXT("place_asset_thematically"))  { return FSemanticCommandModule::PlaceAssetThematically(Args); }
+	if (Cmd == TEXT("refine_level_section"))      { return FSemanticCommandModule::RefineLevelSection(Args); }
+	if (Cmd == TEXT("apply_genre_rules"))         { return FSemanticCommandModule::ApplyGenreRules(Args); }
+	if (Cmd == TEXT("create_in_editor_asset"))    { return FSemanticCommandModule::CreateInEditorAsset(Args); }
+
+	// ── v0.3.0 Closed-Loop Reasoning & Horror Orchestration ──────────────────
+	if (Cmd == TEXT("observe_analyze_plan_act"))  { return Cmd_ObserveAnalyzePlanAct(Args); }
+	if (Cmd == TEXT("enhance_horror_scene"))      { return Cmd_EnhanceHorrorScene(Args); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else
@@ -1685,6 +1703,215 @@ FString UAgentForgeLibrary::Cmd_EnhanceCurrentLevel(const TSharedPtr<FJsonObject
 	Resp->SetStringField(TEXT("post_verify"),    PostVerify.Detail);
 	Resp->SetStringField(TEXT("build_check"),    BuildCheck.Detail);
 	return ToJsonString(Resp);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+
+// ─── v0.3.0: ObserveAnalyzePlanAct ───────────────────────────────────────────
+// Single entry point for the full closed-loop reasoning cycle:
+//   Observe  → GetSemanticEnvironmentSnapshot + GetLevelHierarchy
+//   Analyze  → compute horror_score, identify gaps, generate action plan
+//   Plan     → emit ordered command list as JSON
+//   Act      → execute each command under transaction
+//   Verify   → 4-phase verification
+//   Returns  → complete cycle report
+
+FString UAgentForgeLibrary::Cmd_ObserveAnalyzePlanAct(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const FString Description = Args && Args->HasField(TEXT("description"))
+	                          ? Args->GetStringField(TEXT("description")) : TEXT("");
+	const int32   MaxIter     = Args && Args->HasField(TEXT("max_iterations"))
+	                          ? (int32)Args->GetNumberField(TEXT("max_iterations")) : 1;
+	const float   ScoreTarget = Args && Args->HasField(TEXT("score_target"))
+	                          ? (float)Args->GetNumberField(TEXT("score_target")) : 60.f;
+
+	TArray<TSharedPtr<FJsonValue>> IterLog;
+
+	for (int32 Iter = 0; Iter < MaxIter; ++Iter)
+	{
+		auto IterObj = MakeShared<FJsonObject>();
+		IterObj->SetNumberField(TEXT("iteration"), Iter + 1);
+
+		// ── Observe ──────────────────────────────────────────────────────────
+		const FString SnapRaw = FDataAccessModule::GetSemanticEnvironmentSnapshot();
+		TSharedPtr<FJsonObject> Snapshot;
+		TSharedRef<TJsonReader<>> SR = TJsonReaderFactory<>::Create(SnapRaw);
+		FJsonSerializer::Deserialize(SR, Snapshot);
+
+		float HorrorScore = 0.f;
+		if (Snapshot.IsValid()) { HorrorScore = (float)Snapshot->GetNumberField(TEXT("horror_score")); }
+		IterObj->SetNumberField(TEXT("observed_horror_score"), HorrorScore);
+
+		// ── Analyze ──────────────────────────────────────────────────────────
+		TArray<FString> Issues;
+		TArray<FString> Plan;
+
+		if (Snapshot.IsValid())
+		{
+			// Check darkness.
+			const TSharedPtr<FJsonObject>* LightObj;
+			if (Snapshot->TryGetObjectField(TEXT("lighting"), LightObj))
+			{
+				const float DarkScore = (float)(*LightObj)->GetNumberField(TEXT("darkness_score"));
+				if (DarkScore < 50.f) { Issues.Add(TEXT("Level too bright for horror")); Plan.Add(TEXT("apply_genre_rules:horror")); }
+			}
+			// Check fog.
+			const TSharedPtr<FJsonObject>* PPObj;
+			if (Snapshot->TryGetObjectField(TEXT("post_process"), PPObj))
+			{
+				const float FogDensity = (float)(*PPObj)->GetNumberField(TEXT("fog_density"));
+				if (FogDensity < 0.001f) { Issues.Add(TEXT("No atmospheric fog")); }
+			}
+			// Check density.
+			const TSharedPtr<FJsonObject>* DensObj;
+			if (Snapshot->TryGetObjectField(TEXT("density"), DensObj))
+			{
+				const float Density = (float)(*DensObj)->GetNumberField(TEXT("density_per_m2"));
+				if (Density < 0.5f) { Issues.Add(TEXT("Level too sparse")); Plan.Add(TEXT("place_asset_thematically")); }
+			}
+		}
+
+		// ── Act ───────────────────────────────────────────────────────────────
+		TArray<TSharedPtr<FJsonValue>> ActionResults;
+		for (const FString& PlanStep : Plan)
+		{
+			FString StepResult;
+			if (PlanStep == TEXT("apply_genre_rules:horror"))
+			{
+				auto GA = MakeShared<FJsonObject>();
+				GA->SetStringField(TEXT("genre"), TEXT("horror"));
+				GA->SetNumberField(TEXT("intensity"), 0.8f);
+				StepResult = FSemanticCommandModule::ApplyGenreRules(GA);
+			}
+			else if (PlanStep == TEXT("place_asset_thematically"))
+			{
+				auto PA = MakeShared<FJsonObject>();
+				PA->SetStringField(TEXT("class_path"), TEXT("/Script/Engine.StaticMeshActor"));
+				PA->SetNumberField(TEXT("count"), 3);
+				auto TR = MakeShared<FJsonObject>();
+				TR->SetBoolField(TEXT("prefer_dark"), true);
+				TR->SetBoolField(TEXT("prefer_corners"), true);
+				PA->SetObjectField(TEXT("theme_rules"), TR);
+				StepResult = FSemanticCommandModule::PlaceAssetThematically(PA);
+			}
+			ActionResults.Add(MakeShared<FJsonValueString>(
+				FString::Printf(TEXT("[%s] → %s"), *PlanStep, *StepResult.Left(80))));
+		}
+
+		IterObj->SetArrayField(TEXT("issues_identified"), [&]() {
+			TArray<TSharedPtr<FJsonValue>> A;
+			for (const FString& I : Issues) { A.Add(MakeShared<FJsonValueString>(I)); }
+			return A;
+		}());
+		IterObj->SetArrayField(TEXT("plan_steps"), [&]() {
+			TArray<TSharedPtr<FJsonValue>> A;
+			for (const FString& P : Plan) { A.Add(MakeShared<FJsonValueString>(P)); }
+			return A;
+		}());
+		IterObj->SetArrayField(TEXT("action_results"), ActionResults);
+
+		IterLog.Add(MakeShared<FJsonValueObject>(IterObj));
+
+		// ── Check convergence ────────────────────────────────────────────────
+		if (HorrorScore >= ScoreTarget || Plan.IsEmpty()) { break; }
+	}
+
+	// ── Verify ───────────────────────────────────────────────────────────────
+	const FString VerifyResult = Cmd_RunVerification(nullptr);
+
+	auto Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("description"), Description);
+	Root->SetArrayField(TEXT("iterations"), IterLog);
+	Root->SetStringField(TEXT("verification"), VerifyResult.Left(200));
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+
+// ─── v0.3.0: EnhanceHorrorScene ──────────────────────────────────────────────
+// One-shot horror scene enhancement pipeline:
+//   1. Get semantic snapshot (current state)
+//   2. Apply genre rules (horror atmosphere preset)
+//   3. Place assets thematically (dark corners + occluded spots)
+//   4. Run full 4-phase verification
+//   5. Take screenshot
+// args: description (natural language), [intensity=1.0], [prop_count=5]
+
+FString UAgentForgeLibrary::Cmd_EnhanceHorrorScene(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const FString Description = Args && Args->HasField(TEXT("description"))
+	                          ? Args->GetStringField(TEXT("description")) : TEXT("enhance horror atmosphere");
+	const float   Intensity   = Args && Args->HasField(TEXT("intensity"))
+	                          ? FMath::Clamp((float)Args->GetNumberField(TEXT("intensity")), 0.f, 1.f)
+	                          : 1.f;
+	const int32   PropCount   = Args && Args->HasField(TEXT("prop_count"))
+	                          ? (int32)Args->GetNumberField(TEXT("prop_count")) : 5;
+
+	TArray<TSharedPtr<FJsonValue>> ActionsTaken;
+
+	// Step 1: Observe.
+	const FString SnapshotBefore = FDataAccessModule::GetSemanticEnvironmentSnapshot();
+	ActionsTaken.Add(MakeShared<FJsonValueString>(TEXT("Observed: GetSemanticEnvironmentSnapshot")));
+
+	// Step 2: Apply horror genre rules.
+	auto GenreArgs = MakeShared<FJsonObject>();
+	GenreArgs->SetStringField(TEXT("genre"), TEXT("horror"));
+	GenreArgs->SetNumberField(TEXT("intensity"), Intensity);
+	const FString GenreResult = FSemanticCommandModule::ApplyGenreRules(GenreArgs);
+	ActionsTaken.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Applied horror genre rules (intensity=%.2f)"), Intensity)));
+
+	// Step 3: Place props thematically.
+	auto PlaceArgs = MakeShared<FJsonObject>();
+	PlaceArgs->SetStringField(TEXT("class_path"), TEXT("/Script/Engine.StaticMeshActor"));
+	PlaceArgs->SetNumberField(TEXT("count"), PropCount);
+	PlaceArgs->SetStringField(TEXT("label_prefix"), TEXT("HorrorProp"));
+	auto ThemeRules = MakeShared<FJsonObject>();
+	ThemeRules->SetBoolField(TEXT("prefer_dark"),     true);
+	ThemeRules->SetBoolField(TEXT("prefer_corners"),  true);
+	ThemeRules->SetBoolField(TEXT("prefer_occluded"), true);
+	ThemeRules->SetNumberField(TEXT("min_spacing"), 400.f);
+	PlaceArgs->SetObjectField(TEXT("theme_rules"), ThemeRules);
+	const FString PlaceResult = FSemanticCommandModule::PlaceAssetThematically(PlaceArgs);
+	ActionsTaken.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Placed %d horror props in dark corners"), PropCount)));
+
+	// Step 4: Verify.
+	TSharedPtr<FJsonObject> VerifyArgs = MakeShared<FJsonObject>();
+	VerifyArgs->SetNumberField(TEXT("phase_mask"), 13); // PreFlight + PostVerify + BuildCheck
+	const FString VerifyResult = Cmd_RunVerification(VerifyArgs);
+	ActionsTaken.Add(MakeShared<FJsonValueString>(TEXT("Ran 3-phase verification (mask=13)")));
+
+	// Step 5: Screenshot.
+	FScreenshotRequest::RequestScreenshot(TEXT("enhance_horror_result"), false, false);
+	const FString ScreenshotPath = TEXT("Saved/Screenshots/WindowsEditor/enhance_horror_result.png");
+	ActionsTaken.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Screenshot queued: %s"), *ScreenshotPath)));
+
+	// Observe after.
+	const FString SnapshotAfter = FDataAccessModule::GetSemanticEnvironmentSnapshot();
+	TSharedPtr<FJsonObject> AfterObj;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(SnapshotAfter);
+	FJsonSerializer::Deserialize(Reader, AfterObj);
+	float FinalHorrorScore = 0.f;
+	if (AfterObj.IsValid()) { FinalHorrorScore = (float)AfterObj->GetNumberField(TEXT("horror_score")); }
+
+	auto Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("description"), Description);
+	Root->SetArrayField(TEXT("actions_taken"), ActionsTaken);
+	Root->SetNumberField(TEXT("final_horror_score"), FinalHorrorScore);
+	Root->SetStringField(TEXT("screenshot_path"), ScreenshotPath);
+	Root->SetStringField(TEXT("genre_result"), GenreResult.Left(200));
+	Root->SetStringField(TEXT("placement_result"), PlaceResult.Left(200));
+	return ToJsonString(Root);
 #else
 	return ErrorResponse(TEXT("Editor only."));
 #endif

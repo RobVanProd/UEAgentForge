@@ -1,8 +1,12 @@
 # UEAgentForge
 
+<p align="center">
+  <img src="UEAgentForge.jpg" alt="UEAgentForge — AI-native Unreal Engine development" width="720" />
+</p>
+
 **The first free, open-source, enterprise-grade AI agent control bridge for Unreal Engine 5.**
 
-UEAgentForge evolves the pattern of basic Remote Control API wrappers into a production-standard framework with unbreakable transaction safety, 4-phase verification, and constitution-enforced project governance.
+UEAgentForge evolves the pattern of basic Remote Control API wrappers into a production-standard framework with unbreakable transaction safety, 4-phase verification, constitution-enforced project governance, and — from v0.3.0 — a closed-loop reasoning engine that lets AI agents observe, analyze, plan, and act on your level autonomously.
 
 ## Why UEAgentForge?
 
@@ -13,6 +17,11 @@ UEAgentForge evolves the pattern of basic Remote Control API wrappers into a pro
 | Transaction safety + undo | ✗ | Partial | ✓ Full FScopedTransaction |
 | Snapshot + rollback test | ✗ | ✗ | ✓ Error-injection verified |
 | Constitution enforcement | ✗ | ✗ | ✓ Runtime markdown rules |
+| Spatial intelligence | ✗ | ✗ | ✓ Surface-aware spawn, navmesh, density |
+| Multi-view capture | ✗ | ✗ | ✓ 4 preset horror angles |
+| Environment snapshot | ✗ | ✗ | ✓ Lighting + PP + horror score |
+| Closed-loop OAPA reasoning | ✗ | ✗ | ✓ Observe→Analyze→Plan→Act→Verify |
+| Genre-aware scene enhancement | ✗ | ✗ | ✓ Horror/dark/thriller presets |
 | Python scripting bridge | Partial | ✗ | ✓ |
 | Open source | ✓ | ✗ | ✓ MIT |
 | Free | ✓ | ✗ | ✓ |
@@ -251,6 +260,56 @@ snap = client.create_snapshot("before_big_change")
 # Undo if needed:
 client.undo_transaction()
 ```
+
+### v0.3.0 — Data Access Layer
+| Command | Description |
+|---|---|
+| `get_multi_view_capture` | Viewport screenshot from preset angle (`top`/`front`/`side`/`tension`) |
+| `get_level_hierarchy` | Full Outliner tree — actors, parents, components, bounds, tags |
+| `get_deep_properties` | All UPROPERTY values on any named actor |
+| `get_semantic_env_snapshot` | Lighting analysis, darkness score, PP state, horror rating (0–100) |
+
+### v0.3.0 — Semantic Commands
+| Command | Description |
+|---|---|
+| `place_asset_thematically` | Spawn at dark corners / occluded spots chosen by genre heuristics |
+| `refine_level_section` | Iterative analyze → place → verify loop for a target area |
+| `apply_genre_rules` | Apply atmosphere preset: `horror` / `dark` / `thriller` / `neutral` |
+| `create_in_editor_asset` | Stub — guidance for Geometry Script / Modeling Tools |
+
+### v0.3.0 — Closed-Loop Reasoning
+| Command | Description |
+|---|---|
+| `observe_analyze_plan_act` | Full OAPA loop: Observe→Analyze→Plan→Act→Verify, iterates to score target |
+| `enhance_horror_scene` | One-shot horror pipeline: genre rules + thematic props + verify + screenshot |
+
+### v0.3.0 — AI Asset Wiring
+| Command | Description |
+|---|---|
+| `set_bt_blackboard` | Link BlackboardData to BehaviorTree (bypasses Python CPF_Protected) |
+| `wire_aicontroller_bt` | Wire BeginPlay→RunBehaviorTree in an AIController Blueprint |
+
+### v0.2.0 — Spatial Intelligence
+| Command | Description |
+|---|---|
+| `spawn_actor_at_surface` | Raycast spawn with surface-normal alignment |
+| `align_actors_to_surface` | Drop a batch of actors to the nearest surface |
+| `get_surface_normal_at` | Surface normal at any world point |
+| `analyze_level_composition` | Actor density, bounding box, AI recommendations |
+| `get_actors_in_radius` | Sphere search sorted by distance |
+
+### v0.2.0 — FAB Integration
+| Command | Description |
+|---|---|
+| `search_fab_assets` | Search Fab.com (free-only default) |
+| `download_fab_asset` | Stub — no public Fab download API (returns workaround) |
+| `import_local_asset` | Import FBX/OBJ/PNG/WAV from disk into Content Browser |
+| `list_imported_assets` | List assets in a Content Browser folder |
+
+### v0.2.0 — Orchestration
+| Command | Description |
+|---|---|
+| `enhance_current_level` | Natural language → composition + snapshot + verify + screenshot |
 
 ## Requirements
 

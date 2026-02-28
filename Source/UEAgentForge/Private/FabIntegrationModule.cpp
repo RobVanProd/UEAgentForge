@@ -16,6 +16,7 @@
 #include "Factories/Factory.h"
 #include "Factories/FbxImportUI.h"
 #include "Factories/FbxFactory.h"
+#include "Factories/FbxStaticMeshImportData.h"  // UFbxStaticMeshImportData (forward-decl in FbxImportUI.h only)
 #include "Factories/TextureFactory.h"
 #include "Factories/SoundFactory.h"
 #include "EditorFramework/AssetImportData.h"
@@ -23,6 +24,8 @@
 #include "Misc/Paths.h"
 // HTTP for Fab search
 #include "HttpModule.h"
+#include "HttpManager.h"                              // FHttpManager::Tick()
+#include "GenericPlatform/GenericPlatformHttp.h"     // FGenericPlatformHttp::UrlEncode()
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
 #endif

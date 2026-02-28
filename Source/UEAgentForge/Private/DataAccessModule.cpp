@@ -21,8 +21,8 @@
 #include "Engine/SpotLight.h"
 #include "Engine/SkyLight.h"
 #include "Engine/ExponentialHeightFog.h"
-#include "UnrealClient.h"
-#include "Misc/ScreenshotRequest.h"
+#include "GameFramework/Pawn.h"          // APawn — required for IsA<APawn>()
+#include "UnrealClient.h"  // FScreenshotRequest is in UnrealClient in UE 5.7 (not Misc/ScreenshotRequest.h)
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -453,10 +453,12 @@ void FDataAccessModule::GatherLightingStats(UWorld* World,
 	float TotalIntensity = 0.f;
 	FLinearColor AccColor(0, 0, 0);
 
+	// Check for SkyLight separately (ASkyLight does NOT derive from ALight)
+	for (TActorIterator<ASkyLight> SkyIt(World); SkyIt; ++SkyIt) { bHasSky = true; break; }
+
 	for (TActorIterator<ALight> It(World); It; ++It)
 	{
-		if (ADirectionalLight* D = Cast<ADirectionalLight>(*It)) { bHasDir = true; continue; }
-		if (Cast<ASkyLight>(*It)) { bHasSky = true; continue; }
+		if (Cast<ADirectionalLight>(*It)) { bHasDir = true; continue; }
 
 		if (ULightComponent* LC = (*It)->GetLightComponent())
 		{

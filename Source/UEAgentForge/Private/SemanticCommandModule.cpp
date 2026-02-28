@@ -13,6 +13,9 @@
 #include "Components/LightComponent.h"
 #include "Components/ExponentialHeightFogComponent.h"
 #include "GameFramework/Actor.h"
+#include "Engine/Light.h"               // ALight base class for TActorIterator
+#include "Engine/DirectionalLight.h"    // ADirectionalLight
+#include "Engine/SkyLight.h"            // ASkyLight
 #include "UObject/UObjectGlobals.h"
 
 #if WITH_EDITOR

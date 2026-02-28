@@ -1160,8 +1160,10 @@ FString UAgentForgeLibrary::Cmd_RenameAsset(const TSharedPtr<FJsonObject>& Args)
 
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	TArray<FAssetRenameData> RenameData;
-	const FString NewPath = FPaths::GetPath(AssetPath) + TEXT("/") + NewName;
-	RenameData.Add(FAssetRenameData(FSoftObjectPath(AssetPath), FPaths::GetPath(AssetPath), NewName));
+	const FString NewPath = FPaths::GetPath(AssetPath) / NewName;
+	// UE 5.7: 3-arg FAssetRenameData removed — use 2-SoftObjectPath form
+	const FString NewFullObjectPath = NewPath + TEXT(".") + NewName;
+	RenameData.Add(FAssetRenameData(FSoftObjectPath(AssetPath), FSoftObjectPath(NewFullObjectPath)));
 
 	const bool bOk = AssetTools.RenameAssets(RenameData);
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
@@ -1183,7 +1185,9 @@ FString UAgentForgeLibrary::Cmd_MoveAsset(const TSharedPtr<FJsonObject>& Args)
 	const FString AssetName = FPackageName::GetShortName(AssetPath);
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	TArray<FAssetRenameData> MoveData;
-	MoveData.Add(FAssetRenameData(FSoftObjectPath(AssetPath), DestinationPath, AssetName));
+	// UE 5.7: 3-arg FAssetRenameData(OldPath, PackagePath, Name) removed — use 2-SoftObjectPath form
+	const FString NewFullPath = DestinationPath / AssetName + TEXT(".") + AssetName;
+	MoveData.Add(FAssetRenameData(FSoftObjectPath(AssetPath), FSoftObjectPath(NewFullPath)));
 
 	const bool bOk = AssetTools.RenameAssets(MoveData);
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();

@@ -34,9 +34,10 @@
 #include "Engine/PostProcessVolume.h"
 #include "GameFramework/PlayerStart.h"
 #include "Engine/SkyLight.h"
-#include "AI/Navigation/NavMeshBoundsVolume.h"
+#include "NavMesh/NavMeshBoundsVolume.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "UObject/UnrealType.h"
+#include "UnrealClient.h"  // FScreenshotRequest
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -619,7 +620,7 @@ int32 FLevelPipelineModule::SetupKeyLighting(UWorld* World, const FString& TimeO
 				DLC->LightColor  = bNight
 				                   ? FColor(180, 180, 220)   // moonlight blue
 				                   : FColor(255, 240, 200);  // warm sun
-				DLC->bCastShadows = true;
+				DLC->SetCastShadows(true); // UE 5.7: use setter, not bCastShadows directly
 			}
 			DL->SetActorLabel(TEXT("Pipeline_KeyLight"));
 			++LightsPlaced;
@@ -651,10 +652,11 @@ int32 FLevelPipelineModule::SetupKeyLighting(UWorld* World, const FString& TimeO
 			FTransform(FRotator::ZeroRotator, LightPos), SP);
 		if (PL)
 		{
-			if (UPointLightComponent* PLC = PL->GetLightComponent())
+			// GetLightComponent() returns ULightComponent* — cast down to UPointLightComponent*
+			if (UPointLightComponent* PLC = Cast<UPointLightComponent>(PL->GetLightComponent()))
 			{
 				const float BaseIntensity = bNight ? 800.f : 2000.f;
-				PLC->Intensity   = BaseIntensity * Preset.AmbientIntensityMultiplier;
+				PLC->Intensity         = BaseIntensity * Preset.AmbientIntensityMultiplier;
 				PLC->AttenuationRadius = FMath::Max(Extent.X, Extent.Y) * 1.5f;
 				// Apply ambient tint from preset.
 				const FLinearColor& AC = Preset.AmbientLightColor;
@@ -662,7 +664,7 @@ int32 FLevelPipelineModule::SetupKeyLighting(UWorld* World, const FString& TimeO
 					FMath::Clamp(static_cast<int32>(AC.R * 255.f + (bFearful ? 0 : 50)), 0, 255),
 					FMath::Clamp(static_cast<int32>(AC.G * 255.f + (bFearful ? 0 : 50)), 0, 255),
 					FMath::Clamp(static_cast<int32>(AC.B * 255.f + (bFearful ? 30 : 50)), 0, 255));
-				PLC->bCastShadows = true;
+				PLC->SetCastShadows(true); // UE 5.7: use setter, not bCastShadows directly
 			}
 			PL->SetActorLabel(FString::Printf(TEXT("Pipeline_FillLight_%02d"), i + 1));
 			++LightsPlaced;
@@ -739,7 +741,8 @@ float FLevelPipelineModule::ComputeHorrorScore(UWorld* World)
 	int32 LightCount     = 0;
 	for (TActorIterator<APointLight> It(World); It; ++It)
 	{
-		if (UPointLightComponent* PLC = (*It)->GetLightComponent())
+		// Cast from ULightComponent* to UPointLightComponent*
+		if (UPointLightComponent* PLC = Cast<UPointLightComponent>((*It)->GetLightComponent()))
 		{
 			TotalIntensity += PLC->Intensity;
 			++LightCount;
@@ -1224,7 +1227,8 @@ FString FLevelPipelineModule::GenerateFullQualityLevel(const TSharedPtr<FJsonObj
 		if (World->PersistentLevel)
 			DirtyPackages.Add(World->PersistentLevel->GetOutermost());
 		if (!DirtyPackages.IsEmpty())
-			bLevelSaved = FEditorFileUtils::PromptForCheckoutAndSave(DirtyPackages, false, false);
+			bLevelSaved = (FEditorFileUtils::PromptForCheckoutAndSave(DirtyPackages, false, false)
+			               == FEditorFileUtils::EPromptReturnCode::PR_Success);
 	}
 
 	// ── Quality report ────────────────────────────────────────────────────────

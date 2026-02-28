@@ -44,20 +44,18 @@ public class UEAgentForge : ModuleRules
 			// Spatial awareness
 			"NavigationSystem",       // query_navmesh
 
+			// AI asset types (BehaviorTree, BlackboardData) for set_bt_blackboard command
+			"AIModule",
+
 			// Performance profiling
 			"RHI",                    // GPU frame time, draw call counters
 
 			// Python scripting bridge
 			"PythonScriptPlugin",     // execute_python
 
-			// AI asset wiring — set_bt_blackboard (BehaviorTree/BlackboardData access)
-			"AIModule",
-
-			// Spatial Intelligence Layer — SpatialControlModule
-			// (Engine + NavigationSystem already listed above)
-
-			// FAB Integration — FabIntegrationModule
-			"HTTP",                   // search_fab_assets (web API)
+			// v0.2.0 FAB integration — HTTP requests + audio/sound factory
+			"HTTP",                   // FHttpModule, IHttpRequest, FGenericPlatformHttp::UrlEncode
+			"AudioEditor",            // USoundFactory (WAV import in FabIntegrationModule)
 		});
 	}
 }

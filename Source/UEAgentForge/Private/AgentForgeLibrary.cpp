@@ -10,11 +10,13 @@
 #include "SemanticCommandModule.h"  // v0.3.0 Advanced Semantic Commands
 #include "LevelPresetSystem.h"      // v0.4.0 Named Preset Storage
 #include "LevelPipelineModule.h"    // v0.4.0 Five-Phase AAA Level Pipeline
+#include "ProceduralOpsModule.h"    // v0.5.0 Deterministic Operator Pipeline
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
+#include <cfloat>
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -47,6 +49,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "UObject/SavePackage.h"
+#include "UObject/GarbageCollection.h"
 // Phase 1: material instancing
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInterface.h"
@@ -65,12 +68,21 @@
 #include "IPythonScriptPlugin.h"
 // Transaction safety — explicit with NoPCHs
 #include "ScopedTransaction.h"
+#include "Misc/ScopeLock.h"
+#include "Async/Async.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/Event.h"
+#include "HAL/ThreadSafeBool.h"
 // AI asset wiring — set_bt_blackboard bypasses Python CPF_Protected restriction
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardData.h"
 // wire_aicontroller_bt — blueprint graph node creation
 #include "AIController.h"
 #include "EdGraphSchema_K2.h"
+// setup_flashlight_scs — SCS node setup for Movable SpotLight (bypasses Python SubobjectData mobility limit)
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/SCS_Node.h"
+#include "Components/SpotLightComponent.h"
 #endif
 
 // ============================================================================
@@ -80,6 +92,23 @@
 
 // Simple lock: if set, mutating commands are rejected unless the current level matches.
 static FString GForgeMapLockPackagePath;
+// Serializes Python execution from remote requests to avoid concurrent interpreter access.
+static FCriticalSection GForgePythonExecCS;
+// Tracks open begin/end transaction state.
+static TUniquePtr<FScopedTransaction> GOpenTransaction;
+// Shutdown barrier for close-time command rejection.
+static FThreadSafeBool GForgeShutdownRequested(false);
+
+static bool IsLowMemory(float& OutUsedPercent, float& OutAvailableMB)
+{
+	const FPlatformMemoryStats Mem = FPlatformMemory::GetStats();
+	const double TotalMB = static_cast<double>(Mem.TotalPhysical) / (1024.0 * 1024.0);
+	const double UsedMB = static_cast<double>(Mem.UsedPhysical) / (1024.0 * 1024.0);
+	OutAvailableMB = static_cast<float>(static_cast<double>(Mem.AvailablePhysical) / (1024.0 * 1024.0));
+	OutUsedPercent = (TotalMB > 0.0) ? static_cast<float>((UsedMB / TotalMB) * 100.0) : 0.0f;
+	// Conservative thresholds to avoid hard OOM/editor freeze under heavy generation.
+	return (OutAvailableMB < 2048.0f) || (OutUsedPercent >= 92.0f);
+}
 
 static void SaveNewPackage(UPackage* Package, UObject* Asset)
 {
@@ -106,6 +135,112 @@ static bool GetCurrentLevelPaths(FString& OutPackagePath, FString& OutWorldPath,
 	OutWorldPath   = OutPackagePath + TEXT(".") + ShortName;
 	OutActorPrefix = OutWorldPath + TEXT(":PersistentLevel.");
 	return true;
+}
+
+static bool ContainsAnyToken(const FString& InLower, const TArray<FString>& Tokens)
+{
+	for (const FString& Token : Tokens)
+	{
+		if (InLower.Contains(Token))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static FString ClassifyActorForContext(const FString& Label, const FString& ClassName)
+{
+	FString LabelLower = Label;
+	LabelLower.ToLowerInline();
+	FString ClassLower = ClassName;
+	ClassLower.ToLowerInline();
+	const FString Combined = LabelLower + TEXT(" ") + ClassLower;
+
+	static const TArray<FString> PlayerTokens = {
+		TEXT("playerstart"), TEXT("player"), TEXT("spawn"), TEXT("checkpoint")
+	};
+	static const TArray<FString> ObjectiveTokens = {
+		TEXT("objective"), TEXT("door"), TEXT("key"), TEXT("portal"), TEXT("exit"),
+		TEXT("switch"), TEXT("lever"), TEXT("pickup"), TEXT("artifact"), TEXT("trigger")
+	};
+	static const TArray<FString> AITokens = {
+		TEXT("npc"), TEXT("enemy"), TEXT("monster"), TEXT("character"),
+		TEXT("aicontroller"), TEXT("behavior"),
+		TEXT("controller"), TEXT("bot"), TEXT("warden")
+	};
+	static const TArray<FString> LightingTokens = {
+		TEXT("light"), TEXT("fog"), TEXT("sky"), TEXT("atmosphere"), TEXT("postprocess")
+	};
+	static const TArray<FString> AudioTokens = {
+		TEXT("audio"), TEXT("sound"), TEXT("ambientsound")
+	};
+	static const TArray<FString> VfxTokens = {
+		TEXT("niagara"), TEXT("particle"), TEXT("emitter"), TEXT("vfx")
+	};
+	static const TArray<FString> EnvironmentTokens = {
+		TEXT("staticmesh"), TEXT("foliage"), TEXT("landscape"), TEXT("instanced"),
+		TEXT("brush"), TEXT("terrain")
+	};
+
+	if (ContainsAnyToken(Combined, PlayerTokens))    { return TEXT("player"); }
+	if (ContainsAnyToken(Combined, ObjectiveTokens)) { return TEXT("objective"); }
+	if (LabelLower.StartsWith(TEXT("ai_")) || LabelLower.EndsWith(TEXT("_ai")) ||
+		ClassLower.Contains(TEXT("ai_")) || ClassLower.Contains(TEXT("_ai")))
+	{
+		return TEXT("ai");
+	}
+	if (ContainsAnyToken(Combined, AITokens))        { return TEXT("ai"); }
+	if (ContainsAnyToken(Combined, LightingTokens))  { return TEXT("lighting"); }
+	if (ContainsAnyToken(Combined, AudioTokens))     { return TEXT("audio"); }
+	if (ContainsAnyToken(Combined, VfxTokens))       { return TEXT("vfx"); }
+	if (ContainsAnyToken(Combined, EnvironmentTokens)){ return TEXT("environment"); }
+	return TEXT("other");
+}
+
+static int32 ContextPriorityForCategory(const FString& Category)
+{
+	if (Category == TEXT("player"))    { return 600; }
+	if (Category == TEXT("objective")) { return 550; }
+	if (Category == TEXT("ai"))        { return 500; }
+	if (Category == TEXT("lighting"))  { return 300; }
+	if (Category == TEXT("environment")) { return 200; }
+	if (Category == TEXT("audio"))     { return 160; }
+	if (Category == TEXT("vfx"))       { return 150; }
+	return 100;
+}
+
+static FString ExtractSuffixToken(const FString& InLabel)
+{
+	FString Label = InLabel;
+	Label.ToLowerInline();
+	TArray<FString> Parts;
+	Label.ParseIntoArray(Parts, TEXT("_"), true);
+	if (Parts.Num() == 0)
+	{
+		return FString();
+	}
+	const FString Last = Parts.Last();
+	if (Last.Len() == 0 || Last.Len() > 4)
+	{
+		return FString();
+	}
+	return Last;
+}
+
+static bool IsLikelySystemActorForContext(const FString& Label, const FString& ClassName)
+{
+	FString LabelLower = Label;
+	LabelLower.ToLowerInline();
+	FString ClassLower = ClassName;
+	ClassLower.ToLowerInline();
+	const FString Combined = LabelLower + TEXT(" ") + ClassLower;
+
+	return
+		Combined.Contains(TEXT("gameplaydebugger")) ||
+		Combined.Contains(TEXT("worldsettings")) ||
+		Combined.Contains(TEXT("defaultphysicsvolume")) ||
+		Combined.Contains(TEXT("brush"));
 }
 
 #endif // WITH_EDITOR
@@ -186,12 +321,53 @@ bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
 	return MutatingCmds.Contains(Cmd);
 }
 
+void UAgentForgeLibrary::MarkEngineShuttingDown()
+{
+#if WITH_EDITOR
+	GForgeShutdownRequested = true;
+	if (GOpenTransaction.IsValid())
+	{
+		GOpenTransaction->Cancel();
+		GOpenTransaction.Reset();
+	}
+#endif
+}
+
+bool UAgentForgeLibrary::IsEngineShuttingDown()
+{
+#if WITH_EDITOR
+	return GForgeShutdownRequested || IsEngineExitRequested();
+#else
+	return true;
+#endif
+}
+
 // ============================================================================
 //  BLUEPRINT CALLABLE ENTRY POINTS
 // ============================================================================
 FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 {
 #if WITH_EDITOR
+	if (IsEngineShuttingDown())
+	{
+		return ErrorResponse(TEXT("Engine shutdown in progress; command rejected."));
+	}
+
+	if (!IsInGameThread())
+	{
+		FString Result;
+		FEvent* DoneEvent = FPlatformProcess::GetSynchEventFromPool(true);
+		AsyncTask(ENamedThreads::GameThread, [RequestJson, &Result, DoneEvent]()
+		{
+			Result = UAgentForgeLibrary::ExecuteCommandJson(RequestJson);
+			DoneEvent->Trigger();
+		});
+
+		DoneEvent->Wait();
+		FPlatformProcess::ReturnSynchEventToPool(DoneEvent);
+		return Result;
+	}
+
 	TSharedPtr<FJsonObject> Root;
 	FString ParseErr;
 	if (!ParseJsonObject(RequestJson, Root, ParseErr))
@@ -205,6 +381,30 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 		return ErrorResponse(TEXT("Missing 'cmd' field."));
 	}
 	Cmd.ToLowerInline();
+
+	const bool bOperatorHeavyCommand =
+		Cmd == TEXT("run_operator_pipeline") ||
+		Cmd == TEXT("op_surface_scatter") ||
+		Cmd == TEXT("op_spline_scatter") ||
+		Cmd == TEXT("op_road_layout") ||
+		Cmd == TEXT("op_biome_layers") ||
+		Cmd == TEXT("op_stamp_poi");
+
+	if (Cmd == TEXT("execute_python") || IsMutatingCommand(Cmd) || bOperatorHeavyCommand)
+	{
+		float UsedPct = 0.0f;
+		float AvailableMB = 0.0f;
+		if (IsLowMemory(UsedPct, AvailableMB))
+		{
+			CollectGarbage(RF_NoFlags, true);
+			if (IsLowMemory(UsedPct, AvailableMB))
+			{
+				return ErrorResponse(FString::Printf(
+					TEXT("Memory guard triggered: available memory %.0f MB, used %.1f%%. Aborting %s to prevent OOM."),
+					AvailableMB, UsedPct, *Cmd));
+			}
+		}
+	}
 
 	TSharedPtr<FJsonObject> Args = MakeShared<FJsonObject>();
 	const TSharedPtr<FJsonObject>* ArgsPtr;
@@ -235,6 +435,7 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("get_current_level"))     { return Cmd_GetCurrentLevel(); }
 	if (Cmd == TEXT("assert_current_level"))  { return Cmd_AssertCurrentLevel(Args); }
 	if (Cmd == TEXT("get_actor_bounds"))      { return Cmd_GetActorBounds(Args); }
+	if (Cmd == TEXT("get_world_context"))     { return Cmd_GetWorldContext(Args); }
 	if (Cmd == TEXT("cast_ray"))              { return Cmd_CastRay(Args); }
 	if (Cmd == TEXT("query_navmesh"))         { return Cmd_QueryNavMesh(Args); }
 	if (Cmd == TEXT("begin_transaction"))     { return Cmd_BeginTransaction(Args); }
@@ -251,6 +452,8 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
 	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController Blueprint
 	if (Cmd == TEXT("wire_aicontroller_bt"))  { return Cmd_WireAIControllerBT(Args); }
+	// setup_flashlight_scs: adds/configures Movable SpotLight SCS node in a Blueprint
+	if (Cmd == TEXT("setup_flashlight_scs"))  { return Cmd_SetupFlashlightSCS(Args); }
 
 	// ── v0.2.0 Spatial Intelligence Layer ────────────────────────────────────
 	if (Cmd == TEXT("spawn_actor_at_surface"))   { return FSpatialControlModule::SpawnActorAtSurface(Args); }
@@ -298,6 +501,15 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("apply_professional_lighting"))   { return FLevelPipelineModule::ApplyProfessionalLightingAndAtmosphere(Args); }
 	if (Cmd == TEXT("add_living_systems"))            { return FLevelPipelineModule::AddLivingSystemsAndPolish(Args); }
 	if (Cmd == TEXT("generate_full_quality_level"))   { return FLevelPipelineModule::GenerateFullQualityLevel(Args); }
+	if (Cmd == TEXT("get_procedural_capabilities"))   { return FProceduralOpsModule::GetProceduralCapabilities(Args); }
+	if (Cmd == TEXT("get_operator_policy"))           { return FProceduralOpsModule::GetOperatorPolicy(); }
+	if (Cmd == TEXT("set_operator_policy"))           { return FProceduralOpsModule::SetOperatorPolicy(Args); }
+	if (Cmd == TEXT("op_surface_scatter"))            { return FProceduralOpsModule::SurfaceScatter(Args); }
+	if (Cmd == TEXT("op_spline_scatter"))             { return FProceduralOpsModule::SplineScatter(Args); }
+	if (Cmd == TEXT("op_road_layout"))                { return FProceduralOpsModule::RoadLayout(Args); }
+	if (Cmd == TEXT("op_biome_layers"))               { return FProceduralOpsModule::BiomeLayers(Args); }
+	if (Cmd == TEXT("op_stamp_poi"))                  { return FProceduralOpsModule::StampPOI(Args); }
+	if (Cmd == TEXT("run_operator_pipeline"))         { return FProceduralOpsModule::RunOperatorPipeline(Args); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else
@@ -336,11 +548,23 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 		}
 	}
 
+	// Asset creation/manipulation commands are not reliably rollback-safe under
+	// snapshot testing (e.g. Blueprint asset creation can persist objects in package
+	// memory and trigger duplicate-name assertions on the second pass). For those
+	// commands we intentionally skip Phase 2 and rely on preflight + real execution.
+	const bool bSkipSnapshotRollbackForCommand =
+		Cmd == TEXT("spawn_actor") ||
+		Cmd == TEXT("create_blueprint") ||
+		Cmd == TEXT("create_material_instance") ||
+		Cmd == TEXT("rename_asset") ||
+		Cmd == TEXT("move_asset") ||
+		Cmd == TEXT("delete_asset");
+
 	// Phase 2: Snapshot + Rollback test — intentionally runs BEFORE opening the real
 	// transaction. The rollback test opens and cancels its own inner FScopedTransaction
 	// to confirm that undo works for this command type. Only on success do we open
 	// the permanent transaction below.
-	if (VE)
+	if (VE && !bSkipSnapshotRollbackForCommand)
 	{
 		FVerificationPhaseResult SnapResult = VE->RunSnapshotRollback(
 			[&]() -> bool
@@ -371,6 +595,10 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 				TEXT("Snapshot+Rollback FAILED: %s"), *SnapResult.Detail));
 			return false;
 		}
+	}
+	else if (VE && bSkipSnapshotRollbackForCommand)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[UEAgentForge] Snapshot+Rollback skipped for command '%s' (asset op not rollback-safe)."), *Cmd);
 	}
 
 	// Open the REAL transaction — only reached after Phase 2 confirmed rollback works.
@@ -562,6 +790,506 @@ FString UAgentForgeLibrary::Cmd_GetCurrentLevel()
 	Obj->SetStringField(TEXT("actor_prefix"),  ActorPrefix);
 	Obj->SetStringField(TEXT("map_lock"),      GForgeMapLockPackagePath);
 	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	int32 MaxActors = 120;
+	int32 MaxRelationships = 48;
+	bool bIncludeComponents = false;
+	if (Args.IsValid())
+	{
+		if (Args->HasTypedField<EJson::Number>(TEXT("max_actors")))
+		{
+			MaxActors = FMath::Clamp((int32)Args->GetNumberField(TEXT("max_actors")), 20, 500);
+		}
+		if (Args->HasTypedField<EJson::Number>(TEXT("max_relationships")))
+		{
+			MaxRelationships = FMath::Clamp((int32)Args->GetNumberField(TEXT("max_relationships")), 8, 200);
+		}
+		if (Args->HasTypedField<EJson::Boolean>(TEXT("include_components")))
+		{
+			bIncludeComponents = Args->GetBoolField(TEXT("include_components"));
+		}
+	}
+
+	const FString LevelRaw = Cmd_GetCurrentLevel();
+	const FString CompositionRaw = FSpatialControlModule::AnalyzeLevelComposition();
+	const FString SemanticRaw = FDataAccessModule::GetSemanticEnvironmentSnapshot();
+	const FString HierarchyRaw = FDataAccessModule::GetLevelHierarchy();
+
+	TSharedPtr<FJsonObject> LevelObj;
+	TSharedPtr<FJsonObject> CompositionObj;
+	TSharedPtr<FJsonObject> SemanticObj;
+	TSharedPtr<FJsonObject> HierarchyObj;
+	FString ParseErr;
+
+	if (!ParseJsonObject(LevelRaw, LevelObj, ParseErr))
+	{
+		return ErrorResponse(FString::Printf(TEXT("get_world_context: failed to parse level payload (%s)"), *ParseErr));
+	}
+	if (!ParseJsonObject(CompositionRaw, CompositionObj, ParseErr))
+	{
+		return ErrorResponse(FString::Printf(TEXT("get_world_context: failed to parse composition payload (%s)"), *ParseErr));
+	}
+	if (!ParseJsonObject(SemanticRaw, SemanticObj, ParseErr))
+	{
+		return ErrorResponse(FString::Printf(TEXT("get_world_context: failed to parse semantic payload (%s)"), *ParseErr));
+	}
+	if (!ParseJsonObject(HierarchyRaw, HierarchyObj, ParseErr))
+	{
+		return ErrorResponse(FString::Printf(TEXT("get_world_context: failed to parse hierarchy payload (%s)"), *ParseErr));
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* HierarchyActors = nullptr;
+	if (!HierarchyObj->TryGetArrayField(TEXT("actors"), HierarchyActors) || !HierarchyActors)
+	{
+		return ErrorResponse(TEXT("get_world_context: hierarchy payload missing actors array"));
+	}
+
+	struct FContextActor
+	{
+		FString Label;
+		FString ClassName;
+		FString Category;
+		FVector Location = FVector::ZeroVector;
+		FString Parent;
+		bool bVisible = true;
+		bool bGameplayAnchor = false;
+		float DistanceToCenter = 0.0f;
+		float DistanceSq = 0.0f;
+		int32 ComponentCount = 0;
+		TArray<FString> Tags;
+		int32 Priority = 0;
+	};
+
+	FVector Center = FVector::ZeroVector;
+	bool bHasCenter = false;
+	double SemanticAreaM2 = 0.0;
+	{
+		const TSharedPtr<FJsonObject>* BoundsObj = nullptr;
+		if (SemanticObj->TryGetObjectField(TEXT("level_bounds"), BoundsObj) && *BoundsObj)
+		{
+			if ((*BoundsObj)->HasTypedField<EJson::Number>(TEXT("area_m2")))
+			{
+				SemanticAreaM2 = (*BoundsObj)->GetNumberField(TEXT("area_m2"));
+			}
+			const TSharedPtr<FJsonObject>* CenterObj = nullptr;
+			if ((*BoundsObj)->TryGetObjectField(TEXT("center"), CenterObj) && *CenterObj)
+			{
+				Center.X = (float)(*CenterObj)->GetNumberField(TEXT("x"));
+				Center.Y = (float)(*CenterObj)->GetNumberField(TEXT("y"));
+				Center.Z = (float)(*CenterObj)->GetNumberField(TEXT("z"));
+				bHasCenter = true;
+			}
+		}
+	}
+
+	TArray<FContextActor> AllActors;
+	AllActors.Reserve(HierarchyActors->Num());
+
+	TMap<FString, int32> CategoryCounts;
+	TArray<FString> Warnings;
+	FVector MeanAccumulator = FVector::ZeroVector;
+	int32 MeanCount = 0;
+
+	for (const TSharedPtr<FJsonValue>& Value : *HierarchyActors)
+	{
+		const TSharedPtr<FJsonObject>* ActorObj = nullptr;
+		if (!Value.IsValid() || !Value->TryGetObject(ActorObj) || !ActorObj || !(*ActorObj).IsValid())
+		{
+			continue;
+		}
+
+		FContextActor Entry;
+		Entry.Label = (*ActorObj)->GetStringField(TEXT("label"));
+		Entry.ClassName = (*ActorObj)->GetStringField(TEXT("class"));
+		if (IsLikelySystemActorForContext(Entry.Label, Entry.ClassName))
+		{
+			continue;
+		}
+		Entry.Parent = (*ActorObj)->GetStringField(TEXT("parent"));
+		Entry.bVisible = !(*ActorObj)->HasField(TEXT("is_visible")) || (*ActorObj)->GetBoolField(TEXT("is_visible"));
+
+		const TSharedPtr<FJsonObject>* LocObj = nullptr;
+		if ((*ActorObj)->TryGetObjectField(TEXT("location"), LocObj) && *LocObj)
+		{
+			Entry.Location.X = (float)(*LocObj)->GetNumberField(TEXT("x"));
+			Entry.Location.Y = (float)(*LocObj)->GetNumberField(TEXT("y"));
+			Entry.Location.Z = (float)(*LocObj)->GetNumberField(TEXT("z"));
+			MeanAccumulator += Entry.Location;
+			++MeanCount;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* TagsArr = nullptr;
+		if ((*ActorObj)->TryGetArrayField(TEXT("tags"), TagsArr) && TagsArr)
+		{
+			for (const TSharedPtr<FJsonValue>& TagValue : *TagsArr)
+			{
+				if (!TagValue.IsValid()) { continue; }
+				if (Entry.Tags.Num() >= 6) { break; }
+				Entry.Tags.Add(TagValue->AsString());
+			}
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ComponentsArr = nullptr;
+		if ((*ActorObj)->TryGetArrayField(TEXT("components"), ComponentsArr) && ComponentsArr)
+		{
+			Entry.ComponentCount = ComponentsArr->Num();
+		}
+
+		Entry.Category = ClassifyActorForContext(Entry.Label, Entry.ClassName);
+		Entry.Priority = ContextPriorityForCategory(Entry.Category);
+		Entry.bGameplayAnchor =
+			Entry.Category == TEXT("player") ||
+			Entry.Category == TEXT("objective") ||
+			Entry.Category == TEXT("ai");
+
+		CategoryCounts.FindOrAdd(Entry.Category) += 1;
+		AllActors.Add(MoveTemp(Entry));
+	}
+
+	if (bHasCenter)
+	{
+		const bool bExtremeCenter =
+			FMath::Abs(Center.X) > 20000000.0f ||
+			FMath::Abs(Center.Y) > 20000000.0f ||
+			FMath::Abs(Center.Z) > 20000000.0f;
+		const bool bExtremeArea = SemanticAreaM2 > 1000000000000.0;
+		if (bExtremeCenter || bExtremeArea)
+		{
+			bHasCenter = false;
+			Warnings.Add(TEXT("Semantic bounds were extreme; using actor-derived center for context packet."));
+		}
+	}
+
+	if (!bHasCenter && MeanCount > 0)
+	{
+		Center = MeanAccumulator / (float)MeanCount;
+		bHasCenter = true;
+	}
+	if (!bHasCenter)
+	{
+		Warnings.Add(TEXT("Unable to determine level center; distances may be inaccurate."));
+	}
+
+	for (FContextActor& Actor : AllActors)
+	{
+		Actor.DistanceSq = bHasCenter ? FVector::DistSquared(Actor.Location, Center) : 0.0f;
+		Actor.DistanceToCenter = bHasCenter ? FMath::Sqrt(Actor.DistanceSq) : 0.0f;
+		// Prefer visible actors when priorities tie.
+		if (Actor.bVisible)
+		{
+			Actor.Priority += 20;
+		}
+	}
+
+	AllActors.Sort([](const FContextActor& A, const FContextActor& B)
+	{
+		if (A.Priority != B.Priority) { return A.Priority > B.Priority; }
+		return A.DistanceSq < B.DistanceSq;
+	});
+
+	if (AllActors.Num() == 0)
+	{
+		return ErrorResponse(TEXT("get_world_context: no context actors found after filtering"));
+	}
+
+	const int32 SelectedCount = FMath::Min(MaxActors, AllActors.Num());
+	TArray<FContextActor> SelectedActors;
+	SelectedActors.Reserve(SelectedCount);
+	for (int32 Idx = 0; Idx < SelectedCount; ++Idx)
+	{
+		SelectedActors.Add(AllActors[Idx]);
+	}
+
+	// Spatial hotspots: 4x4 density grid for fast world understanding.
+	const int32 GridSide = 4;
+	const int32 CellCount = GridSide * GridSide;
+	TArray<int32> CellActorCounts;
+	TArray<FVector> CellPositionSums;
+	TArray<TMap<FString, int32>> CellCategoryCounts;
+	CellActorCounts.Init(0, CellCount);
+	CellPositionSums.Init(FVector::ZeroVector, CellCount);
+	CellCategoryCounts.SetNum(CellCount);
+
+	FVector Min(FLT_MAX, FLT_MAX, FLT_MAX);
+	FVector Max(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+	for (const FContextActor& Actor : AllActors)
+	{
+		Min.X = FMath::Min(Min.X, Actor.Location.X);
+		Min.Y = FMath::Min(Min.Y, Actor.Location.Y);
+		Min.Z = FMath::Min(Min.Z, Actor.Location.Z);
+		Max.X = FMath::Max(Max.X, Actor.Location.X);
+		Max.Y = FMath::Max(Max.Y, Actor.Location.Y);
+		Max.Z = FMath::Max(Max.Z, Actor.Location.Z);
+	}
+	const float SpanX = FMath::Max(1.0f, Max.X - Min.X);
+	const float SpanY = FMath::Max(1.0f, Max.Y - Min.Y);
+
+	for (const FContextActor& Actor : AllActors)
+	{
+		const float NormX = (Actor.Location.X - Min.X) / SpanX;
+		const float NormY = (Actor.Location.Y - Min.Y) / SpanY;
+		const int32 IX = FMath::Clamp((int32)FMath::FloorToInt(NormX * (float)GridSide), 0, GridSide - 1);
+		const int32 IY = FMath::Clamp((int32)FMath::FloorToInt(NormY * (float)GridSide), 0, GridSide - 1);
+		const int32 CellIdx = IY * GridSide + IX;
+		CellActorCounts[CellIdx] += 1;
+		CellPositionSums[CellIdx] += Actor.Location;
+		CellCategoryCounts[CellIdx].FindOrAdd(Actor.Category) += 1;
+	}
+
+	struct FHotspot
+	{
+		int32 CellIndex = 0;
+		int32 Count = 0;
+	};
+	TArray<FHotspot> Hotspots;
+	for (int32 CellIdx = 0; CellIdx < CellCount; ++CellIdx)
+	{
+		if (CellActorCounts[CellIdx] <= 0) { continue; }
+		FHotspot H;
+		H.CellIndex = CellIdx;
+		H.Count = CellActorCounts[CellIdx];
+		Hotspots.Add(H);
+	}
+	Hotspots.Sort([](const FHotspot& A, const FHotspot& B)
+	{
+		return A.Count > B.Count;
+	});
+
+	TArray<TSharedPtr<FJsonValue>> HotspotArr;
+	const int32 MaxHotspots = FMath::Min(6, Hotspots.Num());
+	for (int32 Idx = 0; Idx < MaxHotspots; ++Idx)
+	{
+		const FHotspot& H = Hotspots[Idx];
+		const int32 Count = FMath::Max(1, CellActorCounts[H.CellIndex]);
+		const FVector CenterPos = CellPositionSums[H.CellIndex] / (float)Count;
+
+		FString DominantCategory = TEXT("other");
+		int32 DominantCount = 0;
+		for (const TPair<FString, int32>& Pair : CellCategoryCounts[H.CellIndex])
+		{
+			if (Pair.Value > DominantCount)
+			{
+				DominantCategory = Pair.Key;
+				DominantCount = Pair.Value;
+			}
+		}
+
+		TSharedPtr<FJsonObject> HotspotObj = MakeShared<FJsonObject>();
+		HotspotObj->SetNumberField(TEXT("cell"), H.CellIndex);
+		HotspotObj->SetNumberField(TEXT("actor_count"), H.Count);
+		HotspotObj->SetStringField(TEXT("dominant_category"), DominantCategory);
+		HotspotObj->SetObjectField(TEXT("center"), VecToJson(CenterPos));
+		HotspotArr.Add(MakeShared<FJsonValueObject>(HotspotObj));
+	}
+
+	// Relationship inference for gameplay anchors.
+	TArray<TSharedPtr<FJsonValue>> RelationshipArr;
+	TSet<FString> RelationshipKeys;
+
+	auto AddRelationship = [&](const FString& From, const FString& To, const FString& Type, float DistanceCm, float Confidence)
+	{
+		if (From.IsEmpty() || To.IsEmpty() || From == To)
+		{
+			return;
+		}
+		const FString Key = From + TEXT("->") + To + TEXT(":") + Type;
+		if (RelationshipKeys.Contains(Key))
+		{
+			return;
+		}
+		if (RelationshipArr.Num() >= MaxRelationships)
+		{
+			return;
+		}
+		RelationshipKeys.Add(Key);
+		TSharedPtr<FJsonObject> RelObj = MakeShared<FJsonObject>();
+		RelObj->SetStringField(TEXT("from"), From);
+		RelObj->SetStringField(TEXT("to"), To);
+		RelObj->SetStringField(TEXT("type"), Type);
+		RelObj->SetNumberField(TEXT("distance_cm"), DistanceCm);
+		RelObj->SetNumberField(TEXT("confidence"), Confidence);
+		RelationshipArr.Add(MakeShared<FJsonValueObject>(RelObj));
+	};
+
+	TMap<FString, FString> KeysBySuffix;
+	TMap<FString, FString> DoorsBySuffix;
+	TArray<int32> AnchorIndices;
+	for (int32 Idx = 0; Idx < SelectedActors.Num(); ++Idx)
+	{
+		const FContextActor& Actor = SelectedActors[Idx];
+		if (!Actor.bGameplayAnchor)
+		{
+			continue;
+		}
+		AnchorIndices.Add(Idx);
+
+		FString LabelLower = Actor.Label;
+		LabelLower.ToLowerInline();
+		const FString Suffix = ExtractSuffixToken(Actor.Label);
+		if (!Suffix.IsEmpty())
+		{
+			if (LabelLower.Contains(TEXT("key")))
+			{
+				KeysBySuffix.FindOrAdd(Suffix) = Actor.Label;
+			}
+			else if (LabelLower.Contains(TEXT("door")))
+			{
+				DoorsBySuffix.FindOrAdd(Suffix) = Actor.Label;
+			}
+		}
+	}
+
+	for (const TPair<FString, FString>& Pair : KeysBySuffix)
+	{
+		if (const FString* DoorLabel = DoorsBySuffix.Find(Pair.Key))
+		{
+			AddRelationship(Pair.Value, *DoorLabel, TEXT("matching_suffix"), 0.0f, 0.95f);
+		}
+	}
+
+	for (const int32 AnchorIdx : AnchorIndices)
+	{
+		const FContextActor& Anchor = SelectedActors[AnchorIdx];
+		float BestDistSq = TNumericLimits<float>::Max();
+		const FContextActor* BestOther = nullptr;
+
+		for (const int32 OtherIdx : AnchorIndices)
+		{
+			if (AnchorIdx == OtherIdx) { continue; }
+			const FContextActor& Other = SelectedActors[OtherIdx];
+			const float DistSq = FVector::DistSquared(Anchor.Location, Other.Location);
+			if (DistSq < BestDistSq)
+			{
+				BestDistSq = DistSq;
+				BestOther = &Other;
+			}
+		}
+		if (BestOther)
+		{
+			AddRelationship(
+				Anchor.Label,
+				BestOther->Label,
+				TEXT("nearest_anchor"),
+				FMath::Sqrt(BestDistSq),
+				0.6f);
+		}
+	}
+
+	// Build selected actor payload and gameplay anchor payload.
+	TArray<TSharedPtr<FJsonValue>> ActorsArr;
+	TArray<TSharedPtr<FJsonValue>> GameplayAnchorsArr;
+	for (const FContextActor& Actor : SelectedActors)
+	{
+		TSharedPtr<FJsonObject> ActorObj = MakeShared<FJsonObject>();
+		ActorObj->SetStringField(TEXT("label"), Actor.Label);
+		ActorObj->SetStringField(TEXT("class"), Actor.ClassName);
+		ActorObj->SetStringField(TEXT("category"), Actor.Category);
+		ActorObj->SetStringField(TEXT("parent"), Actor.Parent);
+		ActorObj->SetBoolField(TEXT("is_visible"), Actor.bVisible);
+		ActorObj->SetObjectField(TEXT("location"), VecToJson(Actor.Location));
+		ActorObj->SetNumberField(TEXT("distance_to_center_cm"), Actor.DistanceToCenter);
+		if (bIncludeComponents)
+		{
+			ActorObj->SetNumberField(TEXT("component_count"), Actor.ComponentCount);
+		}
+
+		TArray<TSharedPtr<FJsonValue>> TagsJson;
+		for (const FString& Tag : Actor.Tags)
+		{
+			TagsJson.Add(MakeShared<FJsonValueString>(Tag));
+		}
+		ActorObj->SetArrayField(TEXT("tags"), TagsJson);
+		ActorsArr.Add(MakeShared<FJsonValueObject>(ActorObj));
+
+		if (Actor.bGameplayAnchor)
+		{
+			TSharedPtr<FJsonObject> AnchorObj = MakeShared<FJsonObject>();
+			AnchorObj->SetStringField(TEXT("label"), Actor.Label);
+			AnchorObj->SetStringField(TEXT("class"), Actor.ClassName);
+			AnchorObj->SetStringField(TEXT("category"), Actor.Category);
+			AnchorObj->SetObjectField(TEXT("location"), VecToJson(Actor.Location));
+			GameplayAnchorsArr.Add(MakeShared<FJsonValueObject>(AnchorObj));
+		}
+	}
+
+	TSharedPtr<FJsonObject> CategoryCountsObj = MakeShared<FJsonObject>();
+	for (const TPair<FString, int32>& Pair : CategoryCounts)
+	{
+		CategoryCountsObj->SetNumberField(Pair.Key, Pair.Value);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> BriefArr;
+	FString PackagePath = TEXT("");
+	if (!LevelObj->TryGetStringField(TEXT("package_path"), PackagePath))
+	{
+		PackagePath = TEXT("Unknown");
+		Warnings.Add(TEXT("Level payload missing package_path."));
+	}
+	BriefArr.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Map: %s"), *PackagePath)));
+	BriefArr.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Actors: %d total, %d included in context packet"), AllActors.Num(), SelectedActors.Num())));
+
+	const double HorrorScore = SemanticObj->HasTypedField<EJson::Number>(TEXT("horror_score"))
+		? SemanticObj->GetNumberField(TEXT("horror_score")) : 0.0;
+	const FString HorrorRating = SemanticObj->HasTypedField<EJson::String>(TEXT("horror_rating"))
+		? SemanticObj->GetStringField(TEXT("horror_rating")) : TEXT("Unknown");
+	BriefArr.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Atmosphere: horror_score %.1f (%s)"), HorrorScore, *HorrorRating)));
+	BriefArr.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Gameplay anchors: %d, inferred relationships: %d"), GameplayAnchorsArr.Num(), RelationshipArr.Num())));
+	BriefArr.Add(MakeShared<FJsonValueString>(
+		FString::Printf(TEXT("Top hotspot count: %d actors"), Hotspots.Num() > 0 ? Hotspots[0].Count : 0)));
+
+	TArray<TSharedPtr<FJsonValue>> WarningsArr;
+	for (const FString& Warning : Warnings)
+	{
+		WarningsArr.Add(MakeShared<FJsonValueString>(Warning));
+	}
+	if (AllActors.Num() > SelectedActors.Num())
+	{
+		WarningsArr.Add(MakeShared<FJsonValueString>(
+			FString::Printf(TEXT("Context truncated: %d actors omitted by max_actors budget."),
+			AllActors.Num() - SelectedActors.Num())));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> SuggestedNextCmds;
+	SuggestedNextCmds.Add(MakeShared<FJsonValueString>(TEXT("get_deep_properties")));
+	SuggestedNextCmds.Add(MakeShared<FJsonValueString>(TEXT("get_actors_in_radius")));
+	SuggestedNextCmds.Add(MakeShared<FJsonValueString>(TEXT("observe_analyze_plan_act")));
+
+	TSharedPtr<FJsonObject> BudgetObj = MakeShared<FJsonObject>();
+	BudgetObj->SetNumberField(TEXT("max_actors"), MaxActors);
+	BudgetObj->SetNumberField(TEXT("selected_actors"), SelectedActors.Num());
+	BudgetObj->SetNumberField(TEXT("source_actors"), AllActors.Num());
+	BudgetObj->SetBoolField(TEXT("truncated"), AllActors.Num() > SelectedActors.Num());
+	BudgetObj->SetNumberField(TEXT("max_relationships"), MaxRelationships);
+	BudgetObj->SetBoolField(TEXT("include_components"), bIncludeComponents);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("schema"), TEXT("world_context_v1"));
+	Root->SetStringField(TEXT("generated_at_utc"), FDateTime::UtcNow().ToIso8601());
+	Root->SetObjectField(TEXT("budget"), BudgetObj);
+	Root->SetObjectField(TEXT("level"), LevelObj);
+	Root->SetObjectField(TEXT("semantic"), SemanticObj);
+	Root->SetObjectField(TEXT("composition"), CompositionObj);
+	Root->SetObjectField(TEXT("category_counts"), CategoryCountsObj);
+	Root->SetArrayField(TEXT("actors"), ActorsArr);
+	Root->SetArrayField(TEXT("gameplay_anchors"), GameplayAnchorsArr);
+	Root->SetArrayField(TEXT("relationships"), RelationshipArr);
+	Root->SetArrayField(TEXT("spatial_hotspots"), HotspotArr);
+	Root->SetArrayField(TEXT("llm_brief"), BriefArr);
+	Root->SetArrayField(TEXT("warnings"), WarningsArr);
+	Root->SetArrayField(TEXT("suggested_next_cmds"), SuggestedNextCmds);
+	return ToJsonString(Root);
 #else
 	return ErrorResponse(TEXT("Editor only."));
 #endif
@@ -876,15 +1604,83 @@ FString UAgentForgeLibrary::Cmd_CreateBlueprint(const TSharedPtr<FJsonObject>& A
 	Args->TryGetStringField(TEXT("parent_class"),  ParentClass);
 	Args->TryGetStringField(TEXT("output_path"),   OutputPath);
 
+	if (Name.IsEmpty())       { return ErrorResponse(TEXT("create_blueprint requires non-empty 'name'.")); }
+	if (ParentClass.IsEmpty()){ return ErrorResponse(TEXT("create_blueprint requires non-empty 'parent_class'.")); }
+	if (OutputPath.IsEmpty()) { return ErrorResponse(TEXT("create_blueprint requires non-empty 'output_path'.")); }
+	const FString RequestedName = Name;
+	Name = ObjectTools::SanitizeObjectName(Name);
+	if (Name.IsEmpty())
+	{
+		return ErrorResponse(TEXT("create_blueprint name is invalid after sanitization."));
+	}
+	OutputPath.RemoveFromEnd(TEXT("/"));
+	if (!OutputPath.StartsWith(TEXT("/")) || !FPackageName::IsValidLongPackageName(OutputPath))
+	{
+		return ErrorResponse(FString::Printf(TEXT("Invalid output_path: %s"), *OutputPath));
+	}
+
 	UClass* Parent = LoadObject<UClass>(nullptr, *ParentClass);
 	if (!Parent) { return ErrorResponse(FString::Printf(TEXT("Parent class not found: %s"), *ParentClass)); }
 
-	const FString PackageName = FString::Printf(TEXT("%s/%s"), *OutputPath, *Name);
+	auto BuildExistingResponse = [&](UBlueprint* ExistingBP, const FString& ExistingPackageName, const FString& ExistingName) -> FString
+	{
+		TSharedPtr<FJsonObject> ExistingObj = MakeShared<FJsonObject>();
+		ExistingObj->SetBoolField  (TEXT("ok"), true);
+		ExistingObj->SetBoolField  (TEXT("existing"), true);
+		ExistingObj->SetStringField(TEXT("requested_name"), RequestedName);
+		ExistingObj->SetStringField(TEXT("name"), ExistingName);
+		ExistingObj->SetStringField(TEXT("package"), ExistingPackageName);
+		ExistingObj->SetStringField(
+			TEXT("generated_class_path"),
+			ExistingBP && ExistingBP->GeneratedClass ? ExistingBP->GeneratedClass->GetPathName() : TEXT(""));
+		return ToJsonString(ExistingObj);
+	};
+
+	FString FinalName = Name;
+	FString PackageName = FString::Printf(TEXT("%s/%s"), *OutputPath, *FinalName);
+	FString AssetObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, *FinalName);
+
+	// Idempotent fast path: if Blueprint already exists, return it instead of attempting
+	// to recreate (avoids duplicate-name assertion in Kismet2.cpp).
+	if (UBlueprint* ExistingBP = LoadObject<UBlueprint>(nullptr, *AssetObjectPath))
+	{
+		return BuildExistingResponse(ExistingBP, PackageName, FinalName);
+	}
+
+	if (UPackage* ExistingPackage = FindPackage(nullptr, *PackageName))
+	{
+		ExistingPackage->FullyLoad();
+	}
+
 	UPackage* Package = CreatePackage(*PackageName);
 	if (!Package) { return ErrorResponse(TEXT("Failed to create package.")); }
+	Package->FullyLoad();
+
+	// If any object already exists at this name inside the package, pick a unique suffix.
+	if (FindObject<UObject>(Package, *FinalName) != nullptr)
+	{
+		const FName UniqueName = MakeUniqueObjectName(Package, UBlueprint::StaticClass(), *FinalName);
+		FinalName = UniqueName.ToString();
+		PackageName = FString::Printf(TEXT("%s/%s"), *OutputPath, *FinalName);
+		AssetObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, *FinalName);
+		Package = CreatePackage(*PackageName);
+		if (!Package) { return ErrorResponse(TEXT("Failed to create unique package for Blueprint.")); }
+		Package->FullyLoad();
+	}
+
+	if (UBlueprint* ExistingAfterRename = LoadObject<UBlueprint>(nullptr, *AssetObjectPath))
+	{
+		return BuildExistingResponse(ExistingAfterRename, PackageName, FinalName);
+	}
+
+	// Additional in-package collision guard before FKismetEditorUtilities::CreateBlueprint.
+	if (UBlueprint* ExistingInPackage = FindObject<UBlueprint>(Package, *FinalName))
+	{
+		return BuildExistingResponse(ExistingInPackage, PackageName, FinalName);
+	}
 
 	UBlueprint* BP = FKismetEditorUtilities::CreateBlueprint(
-		Parent, Package, *Name, BPTYPE_Normal,
+		Parent, Package, *FinalName, BPTYPE_Normal,
 		UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
 	if (!BP) { return ErrorResponse(TEXT("CreateBlueprint returned null.")); }
 
@@ -893,6 +1689,8 @@ FString UAgentForgeLibrary::Cmd_CreateBlueprint(const TSharedPtr<FJsonObject>& A
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),                   true);
+	Obj->SetStringField(TEXT("requested_name"),       RequestedName);
+	Obj->SetStringField(TEXT("name"),                 FinalName);
 	Obj->SetStringField(TEXT("package"),               PackageName);
 	Obj->SetStringField(TEXT("generated_class_path"),  BP->GeneratedClass ? BP->GeneratedClass->GetPathName() : TEXT(""));
 	return ToJsonString(Obj);
@@ -1224,14 +2022,17 @@ FString UAgentForgeLibrary::Cmd_DeleteAsset(const TSharedPtr<FJsonObject>& Args)
 //  TRANSACTION SAFETY
 // ============================================================================
 
-// Track manually-opened transactions for the begin/end/undo command pair
-static TUniquePtr<FScopedTransaction> GOpenTransaction;
-
 FString UAgentForgeLibrary::Cmd_BeginTransaction(const TSharedPtr<FJsonObject>& Args)
 {
 #if WITH_EDITOR
 	FString Label = TEXT("AgentForge");
 	if (Args.IsValid()) { Args->TryGetStringField(TEXT("label"), Label); }
+	if (GOpenTransaction.IsValid())
+	{
+		// Avoid leaking/implicitly committing a previous transaction when begin is called twice.
+		GOpenTransaction->Cancel();
+		GOpenTransaction.Reset();
+	}
 	GOpenTransaction = MakeUnique<FScopedTransaction>(FText::FromString(Label));
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),    true);
@@ -1307,15 +2108,41 @@ FString UAgentForgeLibrary::Cmd_CreateSnapshot(const TSharedPtr<FJsonObject>& Ar
 FString UAgentForgeLibrary::Cmd_ExecutePython(const TSharedPtr<FJsonObject>& Args)
 {
 #if WITH_EDITOR
+	// Refuse new Python execution while shutting down; this avoids close-time crashes in
+	// PythonScriptPlugin teardown when late remote commands race engine exit.
+	if (IsEngineShuttingDown())
+	{
+		return ErrorResponse(TEXT("Engine exit requested; execute_python is disabled during shutdown."));
+	}
+
 	FString ScriptCode;
 	if (Args.IsValid()) { Args->TryGetStringField(TEXT("script"), ScriptCode); }
 	if (ScriptCode.IsEmpty()) { return ErrorResponse(TEXT("execute_python requires 'script' field.")); }
+	if (ScriptCode.Len() > 500000)
+	{
+		return ErrorResponse(TEXT("execute_python script too large (>500000 chars). Use smaller chunked scripts."));
+	}
+
+	float UsedPctBefore = 0.0f;
+	float AvailMBBefore = 0.0f;
+	if (IsLowMemory(UsedPctBefore, AvailMBBefore))
+	{
+		CollectGarbage(RF_NoFlags, true);
+		if (IsLowMemory(UsedPctBefore, AvailMBBefore))
+		{
+			return ErrorResponse(FString::Printf(
+				TEXT("Memory guard triggered before execute_python: available %.0f MB, used %.1f%%."),
+				AvailMBBefore, UsedPctBefore));
+		}
+	}
 
 	IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
 	if (!Python || !Python->IsPythonAvailable())
 	{
 		return ErrorResponse(TEXT("PythonScriptPlugin not available. Enable it in your .uproject plugins list."));
 	}
+
+	FScopeLock PythonLock(&GForgePythonExecCS);
 
 	// ExecuteStatement runs a code string directly (not a file path).
 	// For multi-line scripts, write to a .py file and use ExecuteFile mode instead.
@@ -1325,10 +2152,38 @@ FString UAgentForgeLibrary::Cmd_ExecutePython(const TSharedPtr<FJsonObject>& Arg
 
 	const bool bOk = Python->ExecPythonCommandEx(PyCmd);
 
+	// Aggressively collect Python garbage after each command. This reduces lingering
+	// wrapper objects that can become invalid during editor shutdown.
+	bool bDidPyGc = false;
+	if (bOk && !IsEngineShuttingDown())
+	{
+		FPythonCommandEx GcCmd;
+		GcCmd.Command       = TEXT("import gc; gc.collect()");
+		GcCmd.ExecutionMode = EPythonCommandExecutionMode::ExecuteStatement;
+		bDidPyGc = Python->ExecPythonCommandEx(GcCmd);
+	}
+
+	bool bForceUeGc = false;
+	if (Args.IsValid()) { Args->TryGetBoolField(TEXT("force_ue_gc"), bForceUeGc); }
+	float UsedPctAfter = 0.0f;
+	float AvailMBAfter = 0.0f;
+	const bool bLowAfter = IsLowMemory(UsedPctAfter, AvailMBAfter);
+	bool bDidUeGc = false;
+	if (bOk && !IsEngineShuttingDown() && (bForceUeGc || bLowAfter))
+	{
+		CollectGarbage(RF_NoFlags, true);
+		bDidUeGc = true;
+		IsLowMemory(UsedPctAfter, AvailMBAfter);
+	}
+
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),     bOk);
 	Obj->SetStringField(TEXT("output"), bOk ? PyCmd.CommandResult : TEXT(""));
 	Obj->SetStringField(TEXT("errors"), bOk ? TEXT("") : PyCmd.CommandResult);
+	Obj->SetBoolField  (TEXT("py_gc_after"), bDidPyGc);
+	Obj->SetBoolField  (TEXT("ue_gc_after"), bDidUeGc);
+	Obj->SetNumberField(TEXT("mem_used_percent"), UsedPctAfter);
+	Obj->SetNumberField(TEXT("mem_available_mb"), AvailMBAfter);
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));
@@ -1636,6 +2491,101 @@ FString UAgentForgeLibrary::Cmd_WireAIControllerBT(const TSharedPtr<FJsonObject>
 	Obj->SetStringField(TEXT("aicontroller"), AICtrlPath);
 	Obj->SetStringField(TEXT("bt_path"),      BtPath);
 	Obj->SetStringField(TEXT("action"),       TEXT("BeginPlay->RunBehaviorTree wired and compiled"));
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+// ============================================================================
+//  SETUP_FLASHLIGHT_SCS
+//  Adds a Movable SpotLightComponent SCS node to a Blueprint and compiles it.
+//  Python SubobjectData cannot set Mobility at design time; runtime SetMobility()
+//  is too late for Lumen scene registration. This C++ command does it correctly.
+// ============================================================================
+FString UAgentForgeLibrary::Cmd_SetupFlashlightSCS(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString BpPath;
+	Args->TryGetStringField(TEXT("blueprint_path"), BpPath);
+	if (BpPath.IsEmpty())
+	{
+		return ErrorResponse(TEXT("setup_flashlight_scs requires 'blueprint_path'"));
+	}
+
+	UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *BpPath);
+	if (!BP)
+	{
+		return ErrorResponse(FString::Printf(TEXT("Blueprint not found: %s"), *BpPath));
+	}
+
+	USimpleConstructionScript* SCS = BP->SimpleConstructionScript;
+	if (!SCS)
+	{
+		return ErrorResponse(TEXT("Blueprint has no SimpleConstructionScript"));
+	}
+
+	// --- Remove any existing SpotLightComponent SCS nodes (clean slate) ---
+	TArray<USCS_Node*> AllNodes = SCS->GetAllNodes();
+	int32 RemovedCount = 0;
+	for (USCS_Node* Node : AllNodes)
+	{
+		if (Node && Node->ComponentClass && Node->ComponentClass->IsChildOf(USpotLightComponent::StaticClass()))
+		{
+			SCS->RemoveNodeAndPromoteChildren(Node);
+			++RemovedCount;
+		}
+	}
+
+	// --- Create a new SpotLightComponent SCS node ---
+	USCS_Node* SpotNode = SCS->CreateNode(USpotLightComponent::StaticClass(), TEXT("FlashlightSpot"));
+	if (!SpotNode)
+	{
+		return ErrorResponse(TEXT("Failed to create SpotLightComponent SCS node"));
+	}
+
+	USpotLightComponent* SpotTemplate = Cast<USpotLightComponent>(SpotNode->ComponentTemplate);
+	if (!SpotTemplate)
+	{
+		return ErrorResponse(TEXT("SpotLightComponent template not accessible"));
+	}
+
+	// Configure the template — these values are baked into the BP, not set at runtime.
+	// Movable is critical: Lumen only renders dynamic/movable lights in real time.
+	SpotTemplate->SetMobility(EComponentMobility::Movable);
+	SpotTemplate->SetIntensity(50000.f);
+	SpotTemplate->SetAttenuationRadius(2500.f);
+	SpotTemplate->SetInnerConeAngle(12.f);
+	SpotTemplate->SetOuterConeAngle(28.f);
+	SpotTemplate->SetLightColor(FLinearColor(1.f, 0.95f, 0.85f));
+	SpotTemplate->SetCastShadows(false);
+	SpotTemplate->SetVisibility(true);
+
+	// Attach under the root node (FlashlightBatteryComponent::BeginPlay re-attaches to camera)
+	USCS_Node* RootNode = SCS->GetDefaultSceneRootNode();
+	if (RootNode)
+	{
+		RootNode->AddChildNode(SpotNode);
+	}
+	else
+	{
+		SCS->AddNode(SpotNode);
+	}
+
+	// Compile and save
+	FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::None);
+
+	UPackage* Pkg = BP->GetOutermost();
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	UPackage::SavePackage(Pkg, BP, *FPackageName::LongPackageNameToFilename(
+		Pkg->GetName(), FPackageName::GetAssetPackageExtension()), SaveArgs);
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField  (TEXT("ok"),             true);
+	Obj->SetStringField(TEXT("blueprint"),      BpPath);
+	Obj->SetNumberField (TEXT("removed_nodes"), (double)RemovedCount);
+	Obj->SetStringField(TEXT("action"),         TEXT("FlashlightSpot SCS node added with Movable mobility, compiled and saved"));
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));

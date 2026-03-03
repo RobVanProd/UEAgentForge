@@ -26,6 +26,9 @@
  *
  *   ping                  → {pong, version}
  *   get_current_level     → {package_path, world_path, actor_prefix, map_lock}
+ *   get_world_context     → {schema, budget, level, semantic, composition, actors[],
+ *                             gameplay_anchors[], relationships[], llm_brief[]}
+ *                           args: [max_actors=120], [max_relationships=48], [include_components=false]
  *   assert_current_level  → {ok, expected_level, current_package_path}
  *   get_all_level_actors  → [{name,label,class,object_path,location,rotation,scale,bounds}]
  *   get_actor_components  → [{name,class,object_path}]       args: label
@@ -201,6 +204,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AgentForge|Core")
 	static FString ExecuteCommandJson(const FString& RequestJson);
 
+	// Module lifecycle hook used by UEAgentForge module shutdown delegates.
+	// Marks command execution as unavailable and releases transient editor state.
+	static void MarkEngineShuttingDown();
+
+	// True when the module has entered shutdown or the engine is exiting.
+	static bool IsEngineShuttingDown();
+
 	/**
 	 * Execute a command inside a full safe transaction with auto-snapshot and verification.
 	 * Returns false and cancels the transaction if any verification phase fails.
@@ -244,6 +254,7 @@ private:
 	static FString Cmd_GetCurrentLevel();
 	static FString Cmd_AssertCurrentLevel(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_GetActorBounds(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetViewportCamera(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_RedrawViewports();
 
@@ -315,6 +326,13 @@ private:
 	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController BP
 	// (bypasses UbergraphPages CPF_Protected restriction)
 	static FString Cmd_WireAIControllerBT(const TSharedPtr<FJsonObject>& Args);
+
+	// ─── Blueprint SCS component setup ────────────────────────────────────────
+	// setup_flashlight_scs: adds/configures a Movable SpotLightComponent SCS node
+	// on a Blueprint — required because Python SubobjectData cannot set mobility
+	// at design time, and runtime SetMobility() is too late for Lumen registration.
+	// Args: { "blueprint_path": "/Game/..." }
+	static FString Cmd_SetupFlashlightSCS(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── Shared utilities ─────────────────────────────────────────────────────
 	static bool            ParseJsonObject(const FString& In, TSharedPtr<FJsonObject>& OutObj, FString& OutErr);

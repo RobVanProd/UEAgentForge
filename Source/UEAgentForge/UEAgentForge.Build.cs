@@ -16,6 +16,7 @@ public class UEAgentForge : ModuleRules
 			"Engine",
 			"UnrealEd",
 			"EditorSubsystem",
+			"Projects",               // IPluginManager runtime plugin capability scan
 
 			// JSON transport (Remote Control API payload format)
 			"Json",

@@ -10,6 +10,7 @@
 UENUM(BlueprintType)
 enum class EVerificationPhase : uint8
 {
+	None        = 0x00,  // No phase (default, required for UHT)
 	PreFlight   = 0x01,  // Validate constitution, capture pre-state
 	Snapshot    = 0x02,  // Auto-snapshot + rollback test (error injection)
 	PostVerify  = 0x04,  // Verify expected state changes occurred

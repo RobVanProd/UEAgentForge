@@ -766,8 +766,12 @@ class AgentForgeClient:
         stop_on_error: bool = True,
         max_actor_delta: Optional[int] = None,
         max_memory_used_mb: Optional[float] = None,
+        allow_menu_level: bool = False,
     ) -> Dict:
-        args: Dict[str, Any] = {"stop_on_error": stop_on_error}
+        args: Dict[str, Any] = {
+            "stop_on_error": stop_on_error,
+            "allow_menu_level": bool(allow_menu_level),
+        }
         if terrain is not None:
             args["terrain"] = terrain
         if surface is not None:

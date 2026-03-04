@@ -5,10 +5,31 @@
 
 #include "Dom/JsonObject.h"
 #include "HAL/FileManager.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+
+namespace
+{
+	static TArray<FString> GetPaletteDirectoriesInternal()
+	{
+		TArray<FString> Directories;
+
+		const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir() / TEXT("ForgePalettes"));
+		Directories.Add(ProjectDir);
+
+		const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UEAgentForge"));
+		if (Plugin.IsValid())
+		{
+			const FString PluginDir = FPaths::ConvertRelativePathToFull(Plugin->GetContentDir() / TEXT("ForgePalettes"));
+			Directories.AddUnique(PluginDir);
+		}
+
+		return Directories;
+	}
+}
 
 FString FPaletteManager::GetPaletteDirectory()
 {
@@ -18,24 +39,25 @@ FString FPaletteManager::GetPaletteDirectory()
 TArray<FString> FPaletteManager::ListAvailablePalettes()
 {
 	TArray<FString> PaletteIds;
-	const FString PaletteDir = GetPaletteDirectory();
-	TArray<FString> Files;
-	IFileManager::Get().FindFiles(Files, *(PaletteDir / TEXT("*.json")), true, false);
-
-	for (const FString& FileName : Files)
+	for (const FString& PaletteDir : GetPaletteDirectoriesInternal())
 	{
-		const FString AbsolutePath = PaletteDir / FileName;
-		TSharedPtr<FJsonObject> Palette;
-		FString Error;
-		if (!LoadPaletteFromFile(AbsolutePath, Palette, Error) || !Palette.IsValid())
+		TArray<FString> Files;
+		IFileManager::Get().FindFiles(Files, *(PaletteDir / TEXT("*.json")), true, false);
+		for (const FString& FileName : Files)
 		{
-			continue;
-		}
+			const FString AbsolutePath = PaletteDir / FileName;
+			TSharedPtr<FJsonObject> Palette;
+			FString Error;
+			if (!LoadPaletteFromFile(AbsolutePath, Palette, Error) || !Palette.IsValid())
+			{
+				continue;
+			}
 
-		FString PaletteId;
-		if (Palette->TryGetStringField(TEXT("palette_id"), PaletteId) && !PaletteId.IsEmpty())
-		{
-			PaletteIds.AddUnique(PaletteId);
+			FString PaletteId;
+			if (Palette->TryGetStringField(TEXT("palette_id"), PaletteId) && !PaletteId.IsEmpty())
+			{
+				PaletteIds.AddUnique(PaletteId);
+			}
 		}
 	}
 
@@ -58,29 +80,30 @@ bool FPaletteManager::LoadPaletteById(
 		return false;
 	}
 
-	const FString PaletteDir = GetPaletteDirectory();
-	TArray<FString> Files;
-	IFileManager::Get().FindFiles(Files, *(PaletteDir / TEXT("*.json")), true, false);
-
-	for (const FString& FileName : Files)
+	for (const FString& PaletteDir : GetPaletteDirectoriesInternal())
 	{
-		TSharedPtr<FJsonObject> Candidate;
-		FString FileError;
-		if (!LoadPaletteFromFile(PaletteDir / FileName, Candidate, FileError) || !Candidate.IsValid())
+		TArray<FString> Files;
+		IFileManager::Get().FindFiles(Files, *(PaletteDir / TEXT("*.json")), true, false);
+		for (const FString& FileName : Files)
 		{
-			continue;
-		}
+			TSharedPtr<FJsonObject> Candidate;
+			FString FileError;
+			if (!LoadPaletteFromFile(PaletteDir / FileName, Candidate, FileError) || !Candidate.IsValid())
+			{
+				continue;
+			}
 
-		FString CandidateId;
-		if (!Candidate->TryGetStringField(TEXT("palette_id"), CandidateId))
-		{
-			continue;
-		}
+			FString CandidateId;
+			if (!Candidate->TryGetStringField(TEXT("palette_id"), CandidateId))
+			{
+				continue;
+			}
 
-		if (CandidateId.Equals(Wanted, ESearchCase::IgnoreCase))
-		{
-			OutPalette = Candidate;
-			return true;
+			if (CandidateId.Equals(Wanted, ESearchCase::IgnoreCase))
+			{
+				OutPalette = Candidate;
+				return true;
+			}
 		}
 	}
 
@@ -112,4 +135,3 @@ bool FPaletteManager::LoadPaletteFromFile(
 
 	return true;
 }
-

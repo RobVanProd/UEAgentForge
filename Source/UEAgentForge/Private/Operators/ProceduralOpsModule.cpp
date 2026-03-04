@@ -2155,6 +2155,13 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 		return ErrorJson(TEXT("No editor world."));
 	}
 
+	const bool bAllowMenuLevel = Args.IsValid() && Args->HasField(TEXT("allow_menu_level")) && Args->GetBoolField(TEXT("allow_menu_level"));
+	const FString PackagePath = World->GetOutermost() ? World->GetOutermost()->GetName() : FString();
+	if (!bAllowMenuLevel && PackagePath.Contains(TEXT("MenuLevel"), ESearchCase::IgnoreCase))
+	{
+		return ErrorJson(TEXT("run_operator_pipeline blocked on MenuLevel. Load a gameplay/validation level first or pass allow_menu_level=true."));
+	}
+
 	if (GOperatorPolicy.bOperatorOnly && Args.IsValid() && Args->HasField(TEXT("allow_atomic_placement")))
 	{
 		const bool bRequestAtomic = Args->GetBoolField(TEXT("allow_atomic_placement"));

@@ -1336,6 +1336,7 @@ Each stage is optional and provided via nested args objects.
 | `stop_on_error` | bool | no | Cancel transaction on first stage failure |
 | `max_actor_delta` | int | no | Rollback if exceeded |
 | `max_memory_used_mb` | float | no | Rollback if exceeded |
+| `allow_menu_level` | bool | no | Override MenuLevel guard (default false) |
 
 **Response includes:**
 - `stages[]` per-stage structured results
@@ -1344,4 +1345,5 @@ Each stage is optional and provided via nested args objects.
 
 **Policy note:**
 - When `operator_only` is enabled (default), direct atomic placement commands (`spawn_actor`, `set_actor_transform`, `delete_actor`) are rejected.
+- `run_operator_pipeline` is blocked on maps with `MenuLevel` in package name unless `allow_menu_level=true`.
 

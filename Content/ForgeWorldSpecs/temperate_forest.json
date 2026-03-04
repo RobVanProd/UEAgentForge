@@ -1,0 +1,10 @@
+{
+  "terrain_seed": 48293,
+  "biome_count": 4,
+  "tree_density": 0.65,
+  "cluster_radius": 500,
+  "clearing_density": 0.15,
+  "road_count": 2,
+  "poi_density": 0.03,
+  "palette_id": "forest_temperate"
+}

@@ -3,12 +3,18 @@
 // ProceduralOpsModule.cpp - deterministic operator-centric procedural workflow.
 
 #include "Operators/ProceduralOpsModule.h"
+#include "Distribution/BiomePartition.h"
+#include "Distribution/Clearings.h"
+#include "Distribution/DensityField.h"
 #include "Distribution/DistributionEngine.h"
+#include "Distribution/InteractionRules.h"
 #include "Palette/PaletteManager.h"
 #include "Terrain/TerrainGenerator.h"
+#include "Visual/SceneEvaluator.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "HAL/PlatformTime.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -42,6 +48,9 @@ namespace
 		int32 MaxPoiPerCall = 48;
 		int32 MaxActorDeltaPerPipeline = 1200;
 		float MaxMemoryUsedMB = 24576.0f;
+		int32 MaxSpawnPoints = 50000;
+		int32 MaxClusterCount = 1024;
+		float MaxGenerationTimeMs = 30000.0f;
 	};
 
 	static FOperatorPolicyState GOperatorPolicy;
@@ -600,6 +609,10 @@ namespace
 		float MinSpacing = 220.0f;
 		int32 Seed = 1337;
 		int32 ExplicitPointCount = 0;
+		int32 ExplicitClusterCount = 0;
+		int32 MaxSpawnPoints = 50000;
+		int32 MaxClusterCount = 1024;
+		float MaxGenerationTimeMs = 30000.0f;
 
 		bool bUseHeightRange = false;
 		float MinHeight = -1000000.0f;
@@ -613,6 +626,51 @@ namespace
 		FVector DistanceOrigin = FVector::ZeroVector;
 		float MinDistance = 0.0f;
 		float MaxDistance = 1000000.0f;
+
+		bool bUseDensityGradient = true;
+		float DensitySigma = 3000.0f;
+		float DensityNoise = 0.15f;
+		int32 DensityFieldResolution = 64;
+
+		bool bUseClearings = false;
+		float ClearingDensity = 0.0f;
+		int32 ExplicitClearingCount = 0;
+		float ClearingRadiusMin = 200.0f;
+		float ClearingRadiusMax = 800.0f;
+
+		bool bUseBiomePartition = false;
+		int32 BiomeCount = 0;
+		float BiomeBlendDistance = 300.0f;
+		TArray<FString> BiomeTypes;
+		TSet<FString> AllowedBiomes;
+
+		bool bUseInteractionRules = false;
+		TArray<FVector> AvoidPoints;
+		float AvoidRadius = 200.0f;
+		TArray<FVector> PreferNearPoints;
+		float PreferRadius = 500.0f;
+		float PreferStrength = 0.5f;
+	};
+
+	struct FDistributionDiagnostics
+	{
+		int32 RequestedPoints = 0;
+		int32 BaseGeneratedPoints = 0;
+		int32 AfterHeightFilter = 0;
+		int32 AfterSlopeFilter = 0;
+		int32 AfterDistanceMask = 0;
+		int32 AfterDensityGradient = 0;
+		int32 AfterClearings = 0;
+		int32 AfterBiomeFilter = 0;
+		int32 AfterInteractionRules = 0;
+		int32 FinalPoints = 0;
+		int32 ClearingCount = 0;
+		int32 BiomeSeedCount = 0;
+		float DensityFieldAverage = 0.0f;
+		double GenerationTimeMs = 0.0;
+		bool bGenerationTimeExceeded = false;
+		TMap<FString, int32> BiomeHistogram;
+		FSceneEvaluationMetrics SceneMetrics;
 	};
 
 	static bool ParseNumericArrayRange(const TSharedPtr<FJsonObject>& Args, const FString& Field, float& OutMin, float& OutMax)
@@ -632,10 +690,56 @@ namespace
 		OutMax = (float)FMath::Max(MinVal, MaxVal);
 		return true;
 	}
+	static bool ParseStringArrayField(const TSharedPtr<FJsonObject>& Args, const FString& Field, TArray<FString>& OutValues)
+	{
+		OutValues.Reset();
+		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+		if (!Args.IsValid() || !Args->TryGetArrayField(Field, Arr) || !Arr)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Entry : *Arr)
+		{
+			if (Entry.IsValid() && Entry->Type == EJson::String)
+			{
+				const FString Value = Entry->AsString().TrimStartAndEnd().ToLower();
+				if (!Value.IsEmpty())
+				{
+					OutValues.Add(Value);
+				}
+			}
+		}
+		return OutValues.Num() > 0;
+	}
+
+	static bool ParseVectorArrayField(const TSharedPtr<FJsonObject>& Args, const FString& Field, TArray<FVector>& OutValues)
+	{
+		OutValues.Reset();
+		const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+		if (!Args.IsValid() || !Args->TryGetArrayField(Field, Arr) || !Arr)
+		{
+			return false;
+		}
+
+		for (const TSharedPtr<FJsonValue>& Entry : *Arr)
+		{
+			FVector Value = FVector::ZeroVector;
+			if (JsonValueToVector(Entry, Value))
+			{
+				OutValues.Add(Value);
+			}
+		}
+		return OutValues.Num() > 0;
+	}
 
 	static FDistributionRequest ParseDistributionRequest(const TSharedPtr<FJsonObject>& Args, AActor* TargetActor)
 	{
 		FDistributionRequest Request;
+		Request.MaxSpawnPoints = GOperatorPolicy.MaxSpawnPoints;
+		Request.MaxClusterCount = GOperatorPolicy.MaxClusterCount;
+		Request.MaxGenerationTimeMs = GOperatorPolicy.MaxGenerationTimeMs;
+
 		if (!Args.IsValid())
 		{
 			if (TargetActor)
@@ -669,6 +773,39 @@ namespace
 		else if (Args->HasField(TEXT("max_points")))
 		{
 			Request.ExplicitPointCount = FMath::Max(0, (int32)Args->GetNumberField(TEXT("max_points")));
+		}
+		if (Args->HasField(TEXT("cluster_count")))
+		{
+			Request.ExplicitClusterCount = FMath::Max(0, (int32)Args->GetNumberField(TEXT("cluster_count")));
+		}
+		if (Args->HasField(TEXT("max_spawn_points")))
+		{
+			Request.MaxSpawnPoints = FMath::Clamp((int32)Args->GetNumberField(TEXT("max_spawn_points")), 1, 500000);
+		}
+		if (Args->HasField(TEXT("max_cluster_count")))
+		{
+			Request.MaxClusterCount = FMath::Clamp((int32)Args->GetNumberField(TEXT("max_cluster_count")), 1, 16384);
+		}
+		if (Args->HasField(TEXT("max_generation_time_ms")))
+		{
+			Request.MaxGenerationTimeMs = FMath::Clamp((float)Args->GetNumberField(TEXT("max_generation_time_ms")), 10.0f, 600000.0f);
+		}
+
+		if (Args->HasField(TEXT("use_density_gradient")))
+		{
+			Request.bUseDensityGradient = Args->GetBoolField(TEXT("use_density_gradient"));
+		}
+		if (Args->HasField(TEXT("density_sigma")))
+		{
+			Request.DensitySigma = FMath::Max(1.0f, (float)Args->GetNumberField(TEXT("density_sigma")));
+		}
+		if (Args->HasField(TEXT("density_noise")))
+		{
+			Request.DensityNoise = FMath::Clamp((float)Args->GetNumberField(TEXT("density_noise")), 0.0f, 1.0f);
+		}
+		if (Args->HasField(TEXT("density_field_resolution")))
+		{
+			Request.DensityFieldResolution = FMath::Clamp((int32)Args->GetNumberField(TEXT("density_field_resolution")), 8, 512);
 		}
 
 		if (ParseNumericArrayRange(Args, TEXT("height_range"), Request.MinHeight, Request.MaxHeight))
@@ -704,6 +841,115 @@ namespace
 			}
 		}
 
+		if (Args->HasField(TEXT("clearing_density")))
+		{
+			Request.ClearingDensity = FMath::Max(0.0f, (float)Args->GetNumberField(TEXT("clearing_density")));
+			Request.bUseClearings = Request.ClearingDensity > KINDA_SMALL_NUMBER;
+		}
+		if (Args->HasField(TEXT("clearing_count")))
+		{
+			Request.ExplicitClearingCount = FMath::Max(0, (int32)Args->GetNumberField(TEXT("clearing_count")));
+			Request.bUseClearings = Request.ExplicitClearingCount > 0 || Request.bUseClearings;
+		}
+		if (Args->HasField(TEXT("clearing_radius_min")))
+		{
+			Request.ClearingRadiusMin = FMath::Max(50.0f, (float)Args->GetNumberField(TEXT("clearing_radius_min")));
+		}
+		if (Args->HasField(TEXT("clearing_radius_max")))
+		{
+			Request.ClearingRadiusMax = FMath::Max(Request.ClearingRadiusMin, (float)Args->GetNumberField(TEXT("clearing_radius_max")));
+		}
+		const TSharedPtr<FJsonObject>* ClearingsObj = nullptr;
+		if (Args->TryGetObjectField(TEXT("clearings"), ClearingsObj) && ClearingsObj && ClearingsObj->IsValid())
+		{
+			if ((*ClearingsObj)->HasField(TEXT("density")))
+			{
+				Request.ClearingDensity = FMath::Max(0.0f, (float)(*ClearingsObj)->GetNumberField(TEXT("density")));
+			}
+			if ((*ClearingsObj)->HasField(TEXT("count")))
+			{
+				Request.ExplicitClearingCount = FMath::Max(0, (int32)(*ClearingsObj)->GetNumberField(TEXT("count")));
+			}
+			if ((*ClearingsObj)->HasField(TEXT("radius_min")))
+			{
+				Request.ClearingRadiusMin = FMath::Max(50.0f, (float)(*ClearingsObj)->GetNumberField(TEXT("radius_min")));
+			}
+			if ((*ClearingsObj)->HasField(TEXT("radius_max")))
+			{
+				Request.ClearingRadiusMax = FMath::Max(Request.ClearingRadiusMin, (float)(*ClearingsObj)->GetNumberField(TEXT("radius_max")));
+			}
+			Request.bUseClearings = Request.ClearingDensity > KINDA_SMALL_NUMBER || Request.ExplicitClearingCount > 0;
+		}
+
+		if (Args->HasField(TEXT("biome_count")))
+		{
+			Request.BiomeCount = FMath::Clamp((int32)Args->GetNumberField(TEXT("biome_count")), 1, 256);
+			Request.bUseBiomePartition = true;
+		}
+		if (Args->HasField(TEXT("biome_blend_distance")))
+		{
+			Request.BiomeBlendDistance = FMath::Max(0.0f, (float)Args->GetNumberField(TEXT("biome_blend_distance")));
+		}
+		ParseStringArrayField(Args, TEXT("biome_types"), Request.BiomeTypes);
+		if (Request.BiomeTypes.Num() > 0)
+		{
+			Request.bUseBiomePartition = true;
+		}
+
+		TArray<FString> AllowedBiomes;
+		if (ParseStringArrayField(Args, TEXT("allowed_biomes"), AllowedBiomes))
+		{
+			Request.bUseBiomePartition = true;
+			for (const FString& Biome : AllowedBiomes)
+			{
+				Request.AllowedBiomes.Add(Biome);
+			}
+		}
+
+		ParseVectorArrayField(Args, TEXT("avoid_points"), Request.AvoidPoints);
+		if (Args->HasField(TEXT("avoid_radius")))
+		{
+			Request.AvoidRadius = FMath::Max(1.0f, (float)Args->GetNumberField(TEXT("avoid_radius")));
+		}
+		ParseVectorArrayField(Args, TEXT("prefer_near_points"), Request.PreferNearPoints);
+		if (Args->HasField(TEXT("prefer_radius")))
+		{
+			Request.PreferRadius = FMath::Max(1.0f, (float)Args->GetNumberField(TEXT("prefer_radius")));
+		}
+		if (Args->HasField(TEXT("prefer_strength")))
+		{
+			Request.PreferStrength = FMath::Clamp((float)Args->GetNumberField(TEXT("prefer_strength")), 0.0f, 1.0f);
+		}
+
+		const TSharedPtr<FJsonObject>* InteractionObj = nullptr;
+		if (Args->TryGetObjectField(TEXT("interaction_rules"), InteractionObj) && InteractionObj && InteractionObj->IsValid())
+		{
+			TArray<FVector> ParsedPoints;
+			if (ParseVectorArrayField(*InteractionObj, TEXT("avoid_points"), ParsedPoints))
+			{
+				Request.AvoidPoints = ParsedPoints;
+			}
+			if ((*InteractionObj)->HasField(TEXT("avoid_radius")))
+			{
+				Request.AvoidRadius = FMath::Max(1.0f, (float)(*InteractionObj)->GetNumberField(TEXT("avoid_radius")));
+			}
+
+			ParsedPoints.Reset();
+			if (ParseVectorArrayField(*InteractionObj, TEXT("prefer_near_points"), ParsedPoints))
+			{
+				Request.PreferNearPoints = ParsedPoints;
+			}
+			if ((*InteractionObj)->HasField(TEXT("prefer_radius")))
+			{
+				Request.PreferRadius = FMath::Max(1.0f, (float)(*InteractionObj)->GetNumberField(TEXT("prefer_radius")));
+			}
+			if ((*InteractionObj)->HasField(TEXT("prefer_strength")))
+			{
+				Request.PreferStrength = FMath::Clamp((float)(*InteractionObj)->GetNumberField(TEXT("prefer_strength")), 0.0f, 1.0f);
+			}
+		}
+		Request.bUseInteractionRules = Request.AvoidPoints.Num() > 0 || Request.PreferNearPoints.Num() > 0;
+
 		if (TargetActor && !Request.bUseDistanceMask)
 		{
 			Request.DistanceOrigin = TargetActor->GetActorLocation();
@@ -712,13 +958,29 @@ namespace
 		return Request;
 	}
 
-	static TArray<FVector> GenerateDistributionPoints(UWorld* World, AActor* TargetActor, const FDistributionRequest& Request)
+	static TArray<FVector> GenerateDistributionPoints(
+		UWorld* World,
+		AActor* TargetActor,
+		const FDistributionRequest& Request,
+		FDistributionDiagnostics* OutDiagnostics = nullptr)
 	{
 		TArray<FVector> Points;
 		if (!TargetActor)
 		{
 			return Points;
 		}
+
+		FDistributionDiagnostics Diagnostics;
+		const double StartSeconds = FPlatformTime::Seconds();
+		auto IsTimeExceeded = [&]() -> bool
+		{
+			if (Request.MaxGenerationTimeMs <= 0.0f)
+			{
+				return false;
+			}
+			const double ElapsedMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
+			return ElapsedMs > (double)Request.MaxGenerationTimeMs;
+		};
 
 		FVector Origin = FVector::ZeroVector;
 		FVector Extent = FVector(2000.0f, 2000.0f, 500.0f);
@@ -729,13 +991,20 @@ namespace
 
 		FBox Bounds(Origin - Extent, Origin + Extent);
 		const float AreaM2 = (Extent.X * 2.0f * Extent.Y * 2.0f) / 10000.0f;
-		const int32 EstimatedByDensity = FMath::Clamp(FMath::RoundToInt(AreaM2 * Request.Density), 1, 100000);
-		const int32 TargetCount = Request.ExplicitPointCount > 0 ? Request.ExplicitPointCount : EstimatedByDensity;
+		const int32 EstimatedByDensity = FMath::Clamp(FMath::RoundToInt(AreaM2 * Request.Density), 1, Request.MaxSpawnPoints);
+		const int32 TargetCount = FMath::Clamp(
+			Request.ExplicitPointCount > 0 ? Request.ExplicitPointCount : EstimatedByDensity,
+			1,
+			Request.MaxSpawnPoints);
+		Diagnostics.RequestedPoints = TargetCount;
 
 		const FString ModeLower = Request.Mode.ToLower();
 		if (ModeLower == TEXT("cluster") || ModeLower == TEXT("clustered"))
 		{
-			const int32 ClusterCount = FMath::Clamp(FMath::RoundToInt(FMath::Sqrt((float)TargetCount) * 0.35f), 1, 256);
+			const int32 ClusterCount = FMath::Clamp(
+				Request.ExplicitClusterCount > 0 ? Request.ExplicitClusterCount : FMath::RoundToInt(FMath::Sqrt((float)TargetCount) * 0.35f),
+				1,
+				Request.MaxClusterCount);
 			const TArray<FVector> Clustered = FDistributionEngine::GenerateClusterPoints(Bounds, TargetCount, ClusterCount, Request.ClusterRadius, Request.Seed);
 			const float MinDistSq = FMath::Square(FMath::Max(1.0f, Request.MinSpacing));
 			for (const FVector& Candidate : Clustered)
@@ -763,18 +1032,136 @@ namespace
 		{
 			Points = FDistributionEngine::GenerateBlueNoisePoints(Bounds, TargetCount, Request.Seed, Request.MinSpacing);
 		}
+		Diagnostics.BaseGeneratedPoints = Points.Num();
+
+		if (Request.Mode.ToLower() == TEXT("cluster") && Request.MinSpacing > 1.0f)
+		{
+			Points = FInteractionRules::ApplySelfSpacing(Points, Request.MinSpacing);
+		}
 
 		if (Request.bUseHeightRange)
 		{
 			Points = FDistributionEngine::ApplyHeightFilter(Points, Request.MinHeight, Request.MaxHeight);
 		}
+		Diagnostics.AfterHeightFilter = Points.Num();
 		if (Request.bUseSlopeRange)
 		{
 			Points = FDistributionEngine::ApplySlopeFilter(Points, World, Request.MinSlope, Request.MaxSlope);
 		}
+		Diagnostics.AfterSlopeFilter = Points.Num();
 		if (Request.bUseDistanceMask)
 		{
 			Points = FDistributionEngine::ApplyDistanceMask(Points, Request.DistanceOrigin, Request.MinDistance, Request.MaxDistance);
+		}
+		Diagnostics.AfterDistanceMask = Points.Num();
+
+		if (!IsTimeExceeded() && Request.bUseDensityGradient && Points.Num() > 0)
+		{
+			FDensityFieldConfig DensityConfig;
+			DensityConfig.BaseDensity = 1.0f;
+			DensityConfig.Sigma = Request.DensitySigma;
+			DensityConfig.Center = Origin;
+			DensityConfig.NoiseBlend = Request.DensityNoise;
+			DensityConfig.Seed = Request.Seed;
+
+			const int32 DensityRes = FMath::Clamp(Request.DensityFieldResolution, 8, 512);
+			const TArray<float> DensityField = FDensityField::GenerateDensityField(Bounds, DensityRes, DensityRes, DensityConfig);
+			float SumDensity = 0.0f;
+			for (const float DensityValue : DensityField)
+			{
+				SumDensity += DensityValue;
+			}
+			Diagnostics.DensityFieldAverage = DensityField.Num() > 0 ? (SumDensity / (float)DensityField.Num()) : 0.0f;
+
+			Points = FDensityField::ApplyDensityGradient(Points, DensityField, DensityRes, DensityRes, Bounds, Request.Seed ^ 0x5B8D3D6A, 0.03f);
+		}
+		Diagnostics.AfterDensityGradient = Points.Num();
+
+		if (!IsTimeExceeded() && Request.bUseClearings && Points.Num() > 0)
+		{
+			const int32 DerivedCount = FMath::Clamp(FMath::RoundToInt((AreaM2 / 2500.0f) * Request.ClearingDensity), 0, 2048);
+			const int32 ClearingCount = Request.ExplicitClearingCount > 0 ? Request.ExplicitClearingCount : DerivedCount;
+			const TArray<FClearingRegion> ClearingRegions = FClearings::GenerateClearings(
+				Bounds,
+				ClearingCount,
+				Request.ClearingRadiusMin,
+				Request.ClearingRadiusMax,
+				Request.Seed ^ 0x1E35A7BD);
+			Diagnostics.ClearingCount = ClearingRegions.Num();
+			Points = FClearings::ApplyClearingMask(Points, ClearingRegions);
+		}
+		Diagnostics.AfterClearings = Points.Num();
+
+		if (!IsTimeExceeded() && Request.bUseBiomePartition && Points.Num() > 0)
+		{
+			const int32 BiomeCount = FMath::Clamp(Request.BiomeCount > 0 ? Request.BiomeCount : FMath::Max(2, Request.BiomeTypes.Num()), 1, 256);
+			const FBiomePartitionData Partition = FBiomePartition::GenerateVoronoiBiomes(
+				Bounds,
+				BiomeCount,
+				Request.BiomeTypes,
+				Request.Seed ^ 0x9E3779B9,
+				Request.BiomeBlendDistance);
+			Diagnostics.BiomeSeedCount = Partition.Seeds.Num();
+
+			TArray<FVector> BiomeFiltered;
+			BiomeFiltered.Reserve(Points.Num());
+			for (const FVector& Point : Points)
+			{
+				const FBiomeBlendSample Blend = FBiomePartition::BlendBiomeEdges(Partition, Point);
+				if (!Blend.PrimaryBiome.IsEmpty())
+				{
+					Diagnostics.BiomeHistogram.FindOrAdd(Blend.PrimaryBiome) += 1;
+				}
+
+				if (Request.AllowedBiomes.Num() == 0)
+				{
+					BiomeFiltered.Add(Point);
+					continue;
+				}
+
+				if (Request.AllowedBiomes.Contains(Blend.PrimaryBiome))
+				{
+					BiomeFiltered.Add(Point);
+					continue;
+				}
+
+				if (!Blend.SecondaryBiome.IsEmpty() &&
+					Request.AllowedBiomes.Contains(Blend.SecondaryBiome) &&
+					Blend.BlendAlpha >= 0.5f)
+				{
+					BiomeFiltered.Add(Point);
+				}
+			}
+
+			Points = MoveTemp(BiomeFiltered);
+		}
+		Diagnostics.AfterBiomeFilter = Points.Num();
+
+		if (!IsTimeExceeded() && Request.bUseInteractionRules && Points.Num() > 0)
+		{
+			if (Request.AvoidPoints.Num() > 0)
+			{
+				Points = FInteractionRules::ApplyAvoidance(Points, Request.AvoidPoints, Request.AvoidRadius);
+			}
+			if (Request.PreferNearPoints.Num() > 0)
+			{
+				Points = FInteractionRules::ApplyAttractorBias(Points, Request.PreferNearPoints, Request.PreferRadius, Request.PreferStrength, Request.Seed ^ 0x7D2B4C91);
+			}
+		}
+		Diagnostics.AfterInteractionRules = Points.Num();
+
+		if (Points.Num() > Request.MaxSpawnPoints)
+		{
+			Points.SetNum(Request.MaxSpawnPoints);
+		}
+
+		Diagnostics.FinalPoints = Points.Num();
+		Diagnostics.GenerationTimeMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
+		Diagnostics.bGenerationTimeExceeded = Request.MaxGenerationTimeMs > 0.0f && Diagnostics.GenerationTimeMs > (double)Request.MaxGenerationTimeMs;
+		Diagnostics.SceneMetrics = FSceneEvaluator::EvaluateScene(Points, Bounds, Request.ClusterRadius);
+		if (OutDiagnostics)
+		{
+			*OutDiagnostics = Diagnostics;
 		}
 
 		return Points;
@@ -790,6 +1177,46 @@ namespace
 			Arr.Add(MakeShared<FJsonValueObject>(VecToObj(Points[Index])));
 		}
 		return Arr;
+	}
+
+	static TSharedPtr<FJsonObject> BuildDistributionDiagnosticsJson(const FDistributionDiagnostics& Diagnostics)
+	{
+		TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+		Obj->SetNumberField(TEXT("requested_points"), Diagnostics.RequestedPoints);
+		Obj->SetNumberField(TEXT("base_generated_points"), Diagnostics.BaseGeneratedPoints);
+		Obj->SetNumberField(TEXT("after_height_filter"), Diagnostics.AfterHeightFilter);
+		Obj->SetNumberField(TEXT("after_slope_filter"), Diagnostics.AfterSlopeFilter);
+		Obj->SetNumberField(TEXT("after_distance_mask"), Diagnostics.AfterDistanceMask);
+		Obj->SetNumberField(TEXT("after_density_gradient"), Diagnostics.AfterDensityGradient);
+		Obj->SetNumberField(TEXT("after_clearings"), Diagnostics.AfterClearings);
+		Obj->SetNumberField(TEXT("after_biome_filter"), Diagnostics.AfterBiomeFilter);
+		Obj->SetNumberField(TEXT("after_interaction_rules"), Diagnostics.AfterInteractionRules);
+		Obj->SetNumberField(TEXT("final_points"), Diagnostics.FinalPoints);
+		Obj->SetNumberField(TEXT("clearing_count"), Diagnostics.ClearingCount);
+		Obj->SetNumberField(TEXT("biome_seed_count"), Diagnostics.BiomeSeedCount);
+		Obj->SetNumberField(TEXT("density_field_average"), Diagnostics.DensityFieldAverage);
+		Obj->SetNumberField(TEXT("generation_time_ms"), Diagnostics.GenerationTimeMs);
+		Obj->SetBoolField(TEXT("generation_time_exceeded"), Diagnostics.bGenerationTimeExceeded);
+
+		TArray<TSharedPtr<FJsonValue>> BiomeCountsArr;
+		for (const TPair<FString, int32>& Pair : Diagnostics.BiomeHistogram)
+		{
+			TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+			Entry->SetStringField(TEXT("biome"), Pair.Key);
+			Entry->SetNumberField(TEXT("count"), Pair.Value);
+			BiomeCountsArr.Add(MakeShared<FJsonValueObject>(Entry));
+		}
+		Obj->SetArrayField(TEXT("biome_histogram"), BiomeCountsArr);
+
+		TSharedPtr<FJsonObject> SceneObj = MakeShared<FJsonObject>();
+		SceneObj->SetNumberField(TEXT("density_variance"), Diagnostics.SceneMetrics.DensityVarianceScore);
+		SceneObj->SetNumberField(TEXT("cluster_score"), Diagnostics.SceneMetrics.ClusterScore);
+		SceneObj->SetNumberField(TEXT("empty_space_score"), Diagnostics.SceneMetrics.EmptySpaceScore);
+		SceneObj->SetNumberField(TEXT("visual_balance"), Diagnostics.SceneMetrics.VisualBalanceScore);
+		SceneObj->SetNumberField(TEXT("combined_score"), Diagnostics.SceneMetrics.CombinedScore);
+		Obj->SetObjectField(TEXT("scene_evaluation"), SceneObj);
+
+		return Obj;
 	}
 
 	static bool ResolvePaletteIfPresent(const TSharedPtr<FJsonObject>& Args, FString& OutPaletteId, TSharedPtr<FJsonObject>& OutPalette, FString& OutPaletteError)
@@ -821,6 +1248,9 @@ FString FProceduralOpsModule::GetOperatorPolicy()
 	Root->SetNumberField(TEXT("max_poi_per_call"), GOperatorPolicy.MaxPoiPerCall);
 	Root->SetNumberField(TEXT("max_actor_delta_per_pipeline"), GOperatorPolicy.MaxActorDeltaPerPipeline);
 	Root->SetNumberField(TEXT("max_memory_used_mb"), GOperatorPolicy.MaxMemoryUsedMB);
+	Root->SetNumberField(TEXT("max_spawn_points"), GOperatorPolicy.MaxSpawnPoints);
+	Root->SetNumberField(TEXT("max_cluster_count"), GOperatorPolicy.MaxClusterCount);
+	Root->SetNumberField(TEXT("max_generation_time_ms"), GOperatorPolicy.MaxGenerationTimeMs);
 	return ToJson(Root);
 }
 
@@ -847,6 +1277,18 @@ FString FProceduralOpsModule::SetOperatorPolicy(const TSharedPtr<FJsonObject>& A
 		if (Args->HasField(TEXT("max_memory_used_mb")))
 		{
 			GOperatorPolicy.MaxMemoryUsedMB = FMath::Max(1024.0f, (float)Args->GetNumberField(TEXT("max_memory_used_mb")));
+		}
+		if (Args->HasField(TEXT("max_spawn_points")))
+		{
+			GOperatorPolicy.MaxSpawnPoints = FMath::Clamp((int32)Args->GetNumberField(TEXT("max_spawn_points")), 1, 500000);
+		}
+		if (Args->HasField(TEXT("max_cluster_count")))
+		{
+			GOperatorPolicy.MaxClusterCount = FMath::Clamp((int32)Args->GetNumberField(TEXT("max_cluster_count")), 1, 16384);
+		}
+		if (Args->HasField(TEXT("max_generation_time_ms")))
+		{
+			GOperatorPolicy.MaxGenerationTimeMs = FMath::Clamp((float)Args->GetNumberField(TEXT("max_generation_time_ms")), 10.0f, 600000.0f);
 		}
 	}
 	return GetOperatorPolicy();
@@ -967,6 +1409,7 @@ FString FProceduralOpsModule::GetProceduralCapabilities(const TSharedPtr<FJsonOb
 	OperatorSupport->SetStringField(TEXT("road_layout"), bRoadReady ? TEXT("plugin") : TEXT("spline_fallback"));
 	OperatorSupport->SetStringField(TEXT("biome_layers"), bLayeredReady ? TEXT("plugin") : (bPCGReady ? TEXT("native_fallback") : TEXT("unavailable")));
 	OperatorSupport->SetStringField(TEXT("terrain_generate"), TEXT("native_baseline"));
+	OperatorSupport->SetStringField(TEXT("visual_intelligence"), TEXT("native_baseline"));
 	OperatorSupport->SetStringField(TEXT("stamp_poi"), TEXT("native"));
 	OperatorSupport->SetStringField(TEXT("run_operator_pipeline"), TEXT("native"));
 	Root->SetObjectField(TEXT("operator_support"), OperatorSupport);
@@ -1001,7 +1444,9 @@ FString FProceduralOpsModule::TerrainGenerate(const TSharedPtr<FJsonObject>& Arg
 	const float Amplitude = (Args.IsValid() && Args->HasField(TEXT("amplitude"))) ? (float)Args->GetNumberField(TEXT("amplitude")) : 1.0f;
 	const float RidgeStrength = (Args.IsValid() && Args->HasField(TEXT("ridge_strength"))) ? (float)Args->GetNumberField(TEXT("ridge_strength")) : 0.35f;
 	const int32 ErosionIterations = (Args.IsValid() && Args->HasField(TEXT("erosion_iterations"))) ? (int32)Args->GetNumberField(TEXT("erosion_iterations")) : 16;
-	const float ErosionStrength = (Args.IsValid() && Args->HasField(TEXT("erosion_strength"))) ? (float)Args->GetNumberField(TEXT("erosion_strength")) : 0.35f;
+	const float ErosionStrength =
+		(Args.IsValid() && Args->HasField(TEXT("erosion_strength"))) ? (float)Args->GetNumberField(TEXT("erosion_strength")) :
+		((Args.IsValid() && Args->HasField(TEXT("sediment_strength"))) ? (float)Args->GetNumberField(TEXT("sediment_strength")) : 0.35f);
 	const bool bSpawnLandscape = (Args.IsValid() && Args->HasField(TEXT("spawn_landscape"))) ? Args->GetBoolField(TEXT("spawn_landscape")) : false;
 
 	TArray<float> Heightmap = FTerrainGenerator::GenerateHeightmap(Width, Height, Seed, Frequency, Amplitude);
@@ -1048,6 +1493,7 @@ FString FProceduralOpsModule::TerrainGenerate(const TSharedPtr<FJsonObject>& Arg
 	Root->SetNumberField(TEXT("ridge_strength"), RidgeStrength);
 	Root->SetNumberField(TEXT("erosion_iterations"), ErosionIterations);
 	Root->SetNumberField(TEXT("erosion_strength"), ErosionStrength);
+	Root->SetNumberField(TEXT("sediment_strength"), ErosionStrength);
 	Root->SetNumberField(TEXT("height_min"), MinH);
 	Root->SetNumberField(TEXT("height_max"), MaxH);
 	Root->SetNumberField(TEXT("height_avg"), AvgH);
@@ -1081,7 +1527,8 @@ FString FProceduralOpsModule::SurfaceScatter(const TSharedPtr<FJsonObject>& Args
 	}
 
 	const FDistributionRequest Distribution = ParseDistributionRequest(Args, TargetActor);
-	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution);
+	FDistributionDiagnostics DistributionDiagnostics;
+	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution, &DistributionDiagnostics);
 
 	FString PaletteId;
 	TSharedPtr<FJsonObject> PaletteObj;
@@ -1096,7 +1543,13 @@ FString FProceduralOpsModule::SurfaceScatter(const TSharedPtr<FJsonObject>& Args
 		TEXT("parameters"), TEXT("generate"),
 		TEXT("distribution_mode"), TEXT("density"), TEXT("cluster_radius"), TEXT("min_spacing"),
 		TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("seed"),
-		TEXT("point_count"), TEXT("max_points"),
+		TEXT("point_count"), TEXT("max_points"), TEXT("cluster_count"),
+		TEXT("max_spawn_points"), TEXT("max_cluster_count"), TEXT("max_generation_time_ms"),
+		TEXT("density_sigma"), TEXT("density_noise"), TEXT("density_field_resolution"), TEXT("use_density_gradient"),
+		TEXT("clearings"), TEXT("clearing_density"), TEXT("clearing_count"), TEXT("clearing_radius_min"), TEXT("clearing_radius_max"),
+		TEXT("biome_count"), TEXT("biome_types"), TEXT("allowed_biomes"), TEXT("biome_blend_distance"),
+		TEXT("avoid_points"), TEXT("avoid_radius"), TEXT("prefer_near_points"), TEXT("prefer_radius"), TEXT("prefer_strength"),
+		TEXT("interaction_rules"),
 		TEXT("palette_id")
 	};
 
@@ -1143,6 +1596,9 @@ FString FProceduralOpsModule::SurfaceScatter(const TSharedPtr<FJsonObject>& Args
 	Root->SetStringField(TEXT("distribution_mode"), Distribution.Mode);
 	Root->SetNumberField(TEXT("distribution_points"), DistributionPoints.Num());
 	Root->SetArrayField(TEXT("distribution_point_sample"), BuildPointSampleArray(DistributionPoints));
+	Root->SetObjectField(TEXT("distribution_diagnostics"), BuildDistributionDiagnosticsJson(DistributionDiagnostics));
+	Root->SetBoolField(TEXT("generation_time_exceeded"), DistributionDiagnostics.bGenerationTimeExceeded);
+	Root->SetNumberField(TEXT("scene_score"), DistributionDiagnostics.SceneMetrics.CombinedScore);
 	if (!PaletteId.IsEmpty())
 	{
 		Root->SetStringField(TEXT("palette_id"), PaletteId);
@@ -1176,7 +1632,8 @@ FString FProceduralOpsModule::SplineScatter(const TSharedPtr<FJsonObject>& Args)
 	}
 
 	const FDistributionRequest Distribution = ParseDistributionRequest(Args, TargetActor);
-	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution);
+	FDistributionDiagnostics DistributionDiagnostics;
+	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution, &DistributionDiagnostics);
 
 	FString PaletteId;
 	TSharedPtr<FJsonObject> PaletteObj;
@@ -1214,7 +1671,13 @@ FString FProceduralOpsModule::SplineScatter(const TSharedPtr<FJsonObject>& Args)
 		TEXT("parameters"), TEXT("generate"),
 		TEXT("distribution_mode"), TEXT("density"), TEXT("cluster_radius"), TEXT("min_spacing"),
 		TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("seed"),
-		TEXT("point_count"), TEXT("max_points"),
+		TEXT("point_count"), TEXT("max_points"), TEXT("cluster_count"),
+		TEXT("max_spawn_points"), TEXT("max_cluster_count"), TEXT("max_generation_time_ms"),
+		TEXT("density_sigma"), TEXT("density_noise"), TEXT("density_field_resolution"), TEXT("use_density_gradient"),
+		TEXT("clearings"), TEXT("clearing_density"), TEXT("clearing_count"), TEXT("clearing_radius_min"), TEXT("clearing_radius_max"),
+		TEXT("biome_count"), TEXT("biome_types"), TEXT("allowed_biomes"), TEXT("biome_blend_distance"),
+		TEXT("avoid_points"), TEXT("avoid_radius"), TEXT("prefer_near_points"), TEXT("prefer_radius"), TEXT("prefer_strength"),
+		TEXT("interaction_rules"),
 		TEXT("palette_id")
 	};
 
@@ -1252,6 +1715,9 @@ FString FProceduralOpsModule::SplineScatter(const TSharedPtr<FJsonObject>& Args)
 	Root->SetStringField(TEXT("distribution_mode"), Distribution.Mode);
 	Root->SetNumberField(TEXT("distribution_points"), DistributionPoints.Num());
 	Root->SetArrayField(TEXT("distribution_point_sample"), BuildPointSampleArray(DistributionPoints));
+	Root->SetObjectField(TEXT("distribution_diagnostics"), BuildDistributionDiagnosticsJson(DistributionDiagnostics));
+	Root->SetBoolField(TEXT("generation_time_exceeded"), DistributionDiagnostics.bGenerationTimeExceeded);
+	Root->SetNumberField(TEXT("scene_score"), DistributionDiagnostics.SceneMetrics.CombinedScore);
 	if (!PaletteId.IsEmpty())
 	{
 		Root->SetStringField(TEXT("palette_id"), PaletteId);
@@ -1402,7 +1868,8 @@ FString FProceduralOpsModule::BiomeLayers(const TSharedPtr<FJsonObject>& Args)
 	}
 
 	const FDistributionRequest Distribution = ParseDistributionRequest(Args, TargetActor);
-	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution);
+	FDistributionDiagnostics DistributionDiagnostics;
+	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution, &DistributionDiagnostics);
 
 	FString PaletteId;
 	TSharedPtr<FJsonObject> PaletteObj;
@@ -1430,7 +1897,13 @@ FString FProceduralOpsModule::BiomeLayers(const TSharedPtr<FJsonObject>& Args)
 		TEXT("layers"), TEXT("parameters"), TEXT("generate"),
 		TEXT("distribution_mode"), TEXT("density"), TEXT("cluster_radius"), TEXT("min_spacing"),
 		TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("seed"),
-		TEXT("point_count"), TEXT("max_points"),
+		TEXT("point_count"), TEXT("max_points"), TEXT("cluster_count"),
+		TEXT("max_spawn_points"), TEXT("max_cluster_count"), TEXT("max_generation_time_ms"),
+		TEXT("density_sigma"), TEXT("density_noise"), TEXT("density_field_resolution"), TEXT("use_density_gradient"),
+		TEXT("clearings"), TEXT("clearing_density"), TEXT("clearing_count"), TEXT("clearing_radius_min"), TEXT("clearing_radius_max"),
+		TEXT("biome_count"), TEXT("biome_types"), TEXT("allowed_biomes"), TEXT("biome_blend_distance"),
+		TEXT("avoid_points"), TEXT("avoid_radius"), TEXT("prefer_near_points"), TEXT("prefer_radius"), TEXT("prefer_strength"),
+		TEXT("interaction_rules"),
 		TEXT("palette_id")
 	};
 	TMap<FString, TSharedPtr<FJsonValue>> ExtraParams;
@@ -1485,6 +1958,9 @@ FString FProceduralOpsModule::BiomeLayers(const TSharedPtr<FJsonObject>& Args)
 	Root->SetStringField(TEXT("distribution_mode"), Distribution.Mode);
 	Root->SetNumberField(TEXT("distribution_points"), DistributionPoints.Num());
 	Root->SetArrayField(TEXT("distribution_point_sample"), BuildPointSampleArray(DistributionPoints));
+	Root->SetObjectField(TEXT("distribution_diagnostics"), BuildDistributionDiagnosticsJson(DistributionDiagnostics));
+	Root->SetBoolField(TEXT("generation_time_exceeded"), DistributionDiagnostics.bGenerationTimeExceeded);
+	Root->SetNumberField(TEXT("scene_score"), DistributionDiagnostics.SceneMetrics.CombinedScore);
 	if (!PaletteId.IsEmpty())
 	{
 		Root->SetStringField(TEXT("palette_id"), PaletteId);
@@ -1694,6 +2170,7 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 
 	int32 MaxActorDelta = GOperatorPolicy.MaxActorDeltaPerPipeline;
 	float MaxMemoryMB = GOperatorPolicy.MaxMemoryUsedMB;
+	float MaxGenerationTimeMs = GOperatorPolicy.MaxGenerationTimeMs;
 	bool bStopOnError = true;
 
 	if (Args.IsValid())
@@ -1706,6 +2183,10 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 		{
 			MaxMemoryMB = FMath::Max(1024.0f, (float)Args->GetNumberField(TEXT("max_memory_used_mb")));
 		}
+		if (Args->HasField(TEXT("max_generation_time_ms")))
+		{
+			MaxGenerationTimeMs = FMath::Clamp((float)Args->GetNumberField(TEXT("max_generation_time_ms")), 10.0f, 600000.0f);
+		}
 		if (Args->HasField(TEXT("stop_on_error")))
 		{
 			bStopOnError = Args->GetBoolField(TEXT("stop_on_error"));
@@ -1715,6 +2196,9 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 	FScopedTransaction Transaction(NSLOCTEXT("UEAgentForge", "RunOperatorPipeline", "AgentForge: Run Operator Pipeline"));
 	TArray<TSharedPtr<FJsonValue>> StageResults;
 	bool bAnyFailure = false;
+	bool bTimeBudgetExceeded = false;
+	FString TimeBudgetFailureReason;
+	const double PipelineStartSeconds = FPlatformTime::Seconds();
 
 	auto BuildStageArgs = [&](const FString& Primary, const FString& Secondary = FString()) -> TSharedPtr<FJsonObject>
 	{
@@ -1755,7 +2239,14 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 			{
 				CopyObj->SetNumberField(TEXT("min_spacing"), Args->GetNumberField(TEXT("min_spacing")));
 			}
-			for (const TCHAR* SharedFieldName : { TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("point_count"), TEXT("max_points") })
+			for (const TCHAR* SharedFieldName : {
+					TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("point_count"), TEXT("max_points"), TEXT("cluster_count"),
+					TEXT("max_spawn_points"), TEXT("max_cluster_count"), TEXT("max_generation_time_ms"),
+					TEXT("density_sigma"), TEXT("density_noise"), TEXT("density_field_resolution"), TEXT("use_density_gradient"),
+					TEXT("clearings"), TEXT("clearing_density"), TEXT("clearing_count"), TEXT("clearing_radius_min"), TEXT("clearing_radius_max"),
+					TEXT("biome_count"), TEXT("biome_types"), TEXT("allowed_biomes"), TEXT("biome_blend_distance"),
+					TEXT("avoid_points"), TEXT("avoid_radius"), TEXT("prefer_near_points"), TEXT("prefer_radius"), TEXT("prefer_strength"),
+					TEXT("interaction_rules") })
 			{
 				const FString SharedField(SharedFieldName);
 				if (!CopyObj->HasField(SharedField))
@@ -1801,7 +2292,14 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 			{
 				CopyObj->SetNumberField(TEXT("min_spacing"), Args->GetNumberField(TEXT("min_spacing")));
 			}
-			for (const TCHAR* SharedFieldName : { TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("point_count"), TEXT("max_points") })
+			for (const TCHAR* SharedFieldName : {
+					TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("point_count"), TEXT("max_points"), TEXT("cluster_count"),
+					TEXT("max_spawn_points"), TEXT("max_cluster_count"), TEXT("max_generation_time_ms"),
+					TEXT("density_sigma"), TEXT("density_noise"), TEXT("density_field_resolution"), TEXT("use_density_gradient"),
+					TEXT("clearings"), TEXT("clearing_density"), TEXT("clearing_count"), TEXT("clearing_radius_min"), TEXT("clearing_radius_max"),
+					TEXT("biome_count"), TEXT("biome_types"), TEXT("allowed_biomes"), TEXT("biome_blend_distance"),
+					TEXT("avoid_points"), TEXT("avoid_radius"), TEXT("prefer_near_points"), TEXT("prefer_radius"), TEXT("prefer_strength"),
+					TEXT("interaction_rules") })
 			{
 				const FString SharedField(SharedFieldName);
 				if (!CopyObj->HasField(SharedField))
@@ -1821,6 +2319,10 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 
 	auto RunStage = [&](const FString& Name, const TSharedPtr<FJsonObject>& StageArgs, TFunctionRef<FString(const TSharedPtr<FJsonObject>&)> Fn)
 	{
+		if (bTimeBudgetExceeded)
+		{
+			return;
+		}
 		if (!StageArgs.IsValid())
 		{
 			return;
@@ -1842,6 +2344,20 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 			bAnyFailure = true;
 		}
 
+		const double ElapsedMs = (FPlatformTime::Seconds() - PipelineStartSeconds) * 1000.0;
+		Parsed->SetNumberField(TEXT("pipeline_elapsed_ms"), ElapsedMs);
+		if (MaxGenerationTimeMs > 0.0f && ElapsedMs > (double)MaxGenerationTimeMs)
+		{
+			bTimeBudgetExceeded = true;
+			bAnyFailure = true;
+			TimeBudgetFailureReason = FString::Printf(
+				TEXT("Generation time %.1f ms exceeded max_generation_time_ms %.1f ms."),
+				ElapsedMs,
+				MaxGenerationTimeMs);
+			Parsed->SetBoolField(TEXT("time_budget_exceeded"), true);
+			Parsed->SetStringField(TEXT("error"), TimeBudgetFailureReason);
+		}
+
 		StageResults.Add(MakeShared<FJsonValueObject>(Parsed));
 	};
 
@@ -1852,12 +2368,25 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 	RunStage(TEXT("spline_scatter"), BuildStageArgs(TEXT("spline_scatter"), TEXT("spline")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::SplineScatter(StageArgs); });
 	RunStage(TEXT("stamp_poi"), BuildStageArgs(TEXT("stamp_poi"), TEXT("poi")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::StampPOI(StageArgs); });
 
+	if (bTimeBudgetExceeded)
+	{
+		Transaction.Cancel();
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetBoolField(TEXT("ok"), false);
+		Root->SetStringField(TEXT("error"), TimeBudgetFailureReason);
+		Root->SetArrayField(TEXT("stages"), StageResults);
+		Root->SetBoolField(TEXT("rolled_back"), true);
+		Root->SetNumberField(TEXT("max_generation_time_ms"), MaxGenerationTimeMs);
+		Root->SetNumberField(TEXT("pipeline_elapsed_ms"), (FPlatformTime::Seconds() - PipelineStartSeconds) * 1000.0);
+		return ToJson(Root);
+	}
+
 	if (bAnyFailure && bStopOnError)
 	{
 		Transaction.Cancel();
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetBoolField(TEXT("ok"), false);
-		Root->SetStringField(TEXT("error"), TEXT("Pipeline halted after a stage error."));
+		Root->SetStringField(TEXT("error"), TimeBudgetFailureReason.IsEmpty() ? TEXT("Pipeline halted after a stage error.") : TimeBudgetFailureReason);
 		Root->SetArrayField(TEXT("stages"), StageResults);
 		Root->SetBoolField(TEXT("rolled_back"), true);
 		return ToJson(Root);
@@ -1907,6 +2436,8 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 	Root->SetNumberField(TEXT("memory_after_mb"), UsedAfterMB);
 	Root->SetNumberField(TEXT("max_actor_delta"), MaxActorDelta);
 	Root->SetNumberField(TEXT("max_memory_used_mb"), MaxMemoryMB);
+	Root->SetNumberField(TEXT("max_generation_time_ms"), MaxGenerationTimeMs);
+	Root->SetNumberField(TEXT("pipeline_elapsed_ms"), (FPlatformTime::Seconds() - PipelineStartSeconds) * 1000.0);
 	return ToJson(Root);
 #else
 	return ErrorJson(TEXT("WITH_EDITOR required."));

@@ -1062,7 +1062,10 @@ Return current runtime constraints for operator-mode generation.
   "allow_atomic_placement": false,
   "max_poi_per_call": 48,
   "max_actor_delta_per_pipeline": 1200,
-  "max_memory_used_mb": 24576.0
+  "max_memory_used_mb": 24576.0,
+  "max_spawn_points": 50000,
+  "max_cluster_count": 1024,
+  "max_generation_time_ms": 30000.0
 }
 ```
 
@@ -1080,6 +1083,9 @@ Update runtime constraints for operator-mode generation.
 | `max_poi_per_call` | int | no | POI spawn cap per `op_stamp_poi` call |
 | `max_actor_delta_per_pipeline` | int | no | Rollback threshold for `run_operator_pipeline` |
 | `max_memory_used_mb` | float | no | Rollback threshold for `run_operator_pipeline` |
+| `max_spawn_points` | int | no | Upper bound for generated distribution points per operator call |
+| `max_cluster_count` | int | no | Upper bound for generated clusters in cluster distribution mode |
+| `max_generation_time_ms` | float | no | Hard generation-time budget for procedural stages |
 
 ---
 
@@ -1100,9 +1106,37 @@ This operator now routes placement intent through `DistributionEngine` before ge
 | `height_range` | array<[min,max]> | no | Height filter |
 | `slope_range` | array<[min,max]> | no | Slope filter in degrees |
 | `distance_mask` | object | no | `{origin:{x,y,z}, min, max}` distance mask |
+| `cluster_count` | int | no | Explicit cluster count override |
+| `max_spawn_points` | int | no | Point cap for safety/performance |
+| `max_cluster_count` | int | no | Cluster cap for safety/performance |
+| `max_generation_time_ms` | float | no | Time budget for distribution build |
+| `use_density_gradient` | bool | no | Enable radial density falloff field |
+| `density_sigma` | float | no | Radial falloff sigma (Gaussian) |
+| `density_noise` | float | no | Perlin blend amount for density variation |
+| `density_field_resolution` | int | no | Density field grid resolution |
+| `clearings` | object | no | `{density,count,radius_min,radius_max}` clearing controls |
+| `clearing_density` | float | no | Scalar clearing density (alt to `clearings`) |
+| `clearing_count` | int | no | Explicit clearing count |
+| `clearing_radius_min` | float | no | Clearing min radius (uu) |
+| `clearing_radius_max` | float | no | Clearing max radius (uu) |
+| `biome_count` | int | no | Voronoi biome seed count |
+| `biome_types` | array<string> | no | Biome labels (`forest`,`meadow`,`rock_field`,`wetland`, etc.) |
+| `allowed_biomes` | array<string> | no | Keep points only in listed biome labels |
+| `biome_blend_distance` | float | no | Edge blending distance for biome transitions |
+| `avoid_points` | array<{x,y,z}> | no | Blocking points for overlap avoidance |
+| `avoid_radius` | float | no | Blocking radius for `avoid_points` |
+| `prefer_near_points` | array<{x,y,z}> | no | Attraction anchors for biased clustering |
+| `prefer_radius` | float | no | Attraction radius |
+| `prefer_strength` | float | no | Attraction strength 0..1 |
+| `interaction_rules` | object | no | Grouped interaction settings object |
 | `seed` | int | no | Deterministic sampling seed |
 | `palette_id` | string | no | Curated palette identifier resolved by `PaletteManager` |
 | `generate` | bool | no | Trigger PCG component generation (default true) |
+
+**Response additions:**
+- `distribution_diagnostics` (point counts after each filter, clearing/biome stats, generation time)
+- `scene_score` (combined score from `SceneEvaluator`)
+- `generation_time_exceeded` (true when local build exceeded `max_generation_time_ms`)
 
 ---
 
@@ -1124,6 +1158,29 @@ Update spline control points and scatter parameters on a spline-based procedural
 | `height_range` | array<[min,max]> | no | Height filter |
 | `slope_range` | array<[min,max]> | no | Slope filter in degrees |
 | `distance_mask` | object | no | `{origin:{x,y,z}, min, max}` distance mask |
+| `cluster_count` | int | no | Explicit cluster count override |
+| `max_spawn_points` | int | no | Point cap for safety/performance |
+| `max_cluster_count` | int | no | Cluster cap for safety/performance |
+| `max_generation_time_ms` | float | no | Time budget for distribution build |
+| `use_density_gradient` | bool | no | Enable radial density falloff field |
+| `density_sigma` | float | no | Radial falloff sigma (Gaussian) |
+| `density_noise` | float | no | Perlin blend amount for density variation |
+| `density_field_resolution` | int | no | Density field grid resolution |
+| `clearings` | object | no | `{density,count,radius_min,radius_max}` clearing controls |
+| `clearing_density` | float | no | Scalar clearing density (alt to `clearings`) |
+| `clearing_count` | int | no | Explicit clearing count |
+| `clearing_radius_min` | float | no | Clearing min radius (uu) |
+| `clearing_radius_max` | float | no | Clearing max radius (uu) |
+| `biome_count` | int | no | Voronoi biome seed count |
+| `biome_types` | array<string> | no | Biome labels |
+| `allowed_biomes` | array<string> | no | Keep points only in listed biome labels |
+| `biome_blend_distance` | float | no | Edge blending distance for biome transitions |
+| `avoid_points` | array<{x,y,z}> | no | Blocking points for overlap avoidance |
+| `avoid_radius` | float | no | Blocking radius for `avoid_points` |
+| `prefer_near_points` | array<{x,y,z}> | no | Attraction anchors for biased clustering |
+| `prefer_radius` | float | no | Attraction radius |
+| `prefer_strength` | float | no | Attraction strength 0..1 |
+| `interaction_rules` | object | no | Grouped interaction settings object |
 | `seed` | int | no | Deterministic sampling seed |
 | `palette_id` | string | no | Curated palette identifier |
 | `generate` | bool | no | Trigger PCG generation |
@@ -1162,6 +1219,29 @@ Apply layered biome controls (groundcover/shrub/tree/rock density, path width, s
 | `height_range` | array<[min,max]> | no | Height filter |
 | `slope_range` | array<[min,max]> | no | Slope filter in degrees |
 | `distance_mask` | object | no | `{origin:{x,y,z}, min, max}` distance mask |
+| `cluster_count` | int | no | Explicit cluster count override |
+| `max_spawn_points` | int | no | Point cap for safety/performance |
+| `max_cluster_count` | int | no | Cluster cap for safety/performance |
+| `max_generation_time_ms` | float | no | Time budget for distribution build |
+| `use_density_gradient` | bool | no | Enable radial density falloff field |
+| `density_sigma` | float | no | Radial falloff sigma (Gaussian) |
+| `density_noise` | float | no | Perlin blend amount for density variation |
+| `density_field_resolution` | int | no | Density field grid resolution |
+| `clearings` | object | no | `{density,count,radius_min,radius_max}` clearing controls |
+| `clearing_density` | float | no | Scalar clearing density (alt to `clearings`) |
+| `clearing_count` | int | no | Explicit clearing count |
+| `clearing_radius_min` | float | no | Clearing min radius (uu) |
+| `clearing_radius_max` | float | no | Clearing max radius (uu) |
+| `biome_count` | int | no | Voronoi biome seed count |
+| `biome_types` | array<string> | no | Biome labels |
+| `allowed_biomes` | array<string> | no | Keep points only in listed biome labels |
+| `biome_blend_distance` | float | no | Edge blending distance for biome transitions |
+| `avoid_points` | array<{x,y,z}> | no | Blocking points for overlap avoidance |
+| `avoid_radius` | float | no | Blocking radius for `avoid_points` |
+| `prefer_near_points` | array<{x,y,z}> | no | Attraction anchors for biased clustering |
+| `prefer_radius` | float | no | Attraction radius |
+| `prefer_strength` | float | no | Attraction strength 0..1 |
+| `interaction_rules` | object | no | Grouped interaction settings object |
 | `seed` | int | no | Deterministic sampling seed |
 | `palette_id` | string | no | Curated palette identifier |
 | `generate` | bool | no | Trigger procedural generation |
@@ -1183,6 +1263,7 @@ Generate deterministic terrain data (heightmap + ridged-noise + erosion baseline
 | `ridge_strength` | float | no | Ridged-noise blend strength |
 | `erosion_iterations` | int | no | Thermal erosion iterations |
 | `erosion_strength` | float | no | Thermal erosion blend strength |
+| `sediment_strength` | float | no | Alias for erosion strength |
 | `spawn_landscape` | bool | no | Attempt direct landscape spawn (stub-safe) |
 
 ---
@@ -1229,6 +1310,29 @@ Each stage is optional and provided via nested args objects.
 | `height_range` | array | no | Shared height filter injected when missing |
 | `slope_range` | array | no | Shared slope filter injected when missing |
 | `distance_mask` | object | no | Shared distance mask injected when missing |
+| `cluster_count` | int | no | Shared cluster count injected when missing |
+| `max_spawn_points` | int | no | Shared spawn-point cap injected when missing |
+| `max_cluster_count` | int | no | Shared cluster cap injected when missing |
+| `max_generation_time_ms` | float | no | Shared stage/pipeline generation budget |
+| `use_density_gradient` | bool | no | Shared density-gradient toggle |
+| `density_sigma` | float | no | Shared Gaussian sigma |
+| `density_noise` | float | no | Shared density noise blend |
+| `density_field_resolution` | int | no | Shared density-field resolution |
+| `clearings` | object | no | Shared clearing settings object |
+| `clearing_density` | float | no | Shared clearing density |
+| `clearing_count` | int | no | Shared clearing count |
+| `clearing_radius_min` | float | no | Shared min clearing radius |
+| `clearing_radius_max` | float | no | Shared max clearing radius |
+| `biome_count` | int | no | Shared Voronoi biome count |
+| `biome_types` | array<string> | no | Shared biome labels |
+| `allowed_biomes` | array<string> | no | Shared allowed biome set |
+| `biome_blend_distance` | float | no | Shared biome edge blend distance |
+| `avoid_points` | array<{x,y,z}> | no | Shared interaction blocking points |
+| `avoid_radius` | float | no | Shared interaction blocking radius |
+| `prefer_near_points` | array<{x,y,z}> | no | Shared interaction attraction anchors |
+| `prefer_radius` | float | no | Shared interaction attraction radius |
+| `prefer_strength` | float | no | Shared interaction attraction strength |
+| `interaction_rules` | object | no | Shared grouped interaction settings |
 | `stop_on_error` | bool | no | Cancel transaction on first stage failure |
 | `max_actor_delta` | int | no | Rollback if exceeded |
 | `max_memory_used_mb` | float | no | Rollback if exceeded |

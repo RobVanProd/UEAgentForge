@@ -2,6 +2,7 @@
 // TerrainGenerator.cpp - baseline terrain utility implementations.
 
 #include "Terrain/TerrainGenerator.h"
+#include "Terrain/ErosionSim.h"
 
 #include "Engine/World.h"
 #include "Math/RandomStream.h"
@@ -104,36 +105,10 @@ void FTerrainGenerator::ApplyErosion(
 		return;
 	}
 
-	TArray<float> Scratch;
-	Scratch.SetNumUninitialized(Heightmap.Num());
-
-	for (int32 Iteration = 0; Iteration < Steps; ++Iteration)
-	{
-		for (int32 Y = 0; Y < Height; ++Y)
-		{
-			for (int32 X = 0; X < Width; ++X)
-			{
-				float Sum = 0.0f;
-				int32 Samples = 0;
-				for (int32 DY = -1; DY <= 1; ++DY)
-				{
-					for (int32 DX = -1; DX <= 1; ++DX)
-					{
-						const int32 SX = FMath::Clamp(X + DX, 0, Width - 1);
-						const int32 SY = FMath::Clamp(Y + DY, 0, Height - 1);
-						Sum += Heightmap[HeightmapIndex(SX, SY, Width)];
-						++Samples;
-					}
-				}
-
-				const int32 Index = HeightmapIndex(X, Y, Width);
-				const float Smoothed = (Samples > 0) ? (Sum / (float)Samples) : Heightmap[Index];
-				Scratch[Index] = FMath::Lerp(Heightmap[Index], Smoothed, ErodeStrength);
-			}
-		}
-
-		Heightmap = Scratch;
-	}
+	// Thermal erosion creates more natural ridges/valleys than pure blur smoothing.
+	const float TalusThreshold = FMath::Lerp(0.06f, 0.01f, ErodeStrength);
+	const float SedimentStrength = ErodeStrength;
+	FErosionSim::ApplyThermalErosion(Heightmap, Width, Height, Steps, TalusThreshold, SedimentStrength);
 }
 
 void FTerrainGenerator::NormalizeHeightmap(TArray<float>& Heightmap, float MinOut, float MaxOut)
@@ -198,4 +173,3 @@ bool FTerrainGenerator::SpawnLandscape(
 		Scale.X, Scale.Y, Scale.Z);
 	return false;
 }
-

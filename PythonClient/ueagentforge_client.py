@@ -284,6 +284,9 @@ class AgentForgeClient:
         max_poi_per_call: Optional[int] = None,
         max_actor_delta_per_pipeline: Optional[int] = None,
         max_memory_used_mb: Optional[float] = None,
+        max_spawn_points: Optional[int] = None,
+        max_cluster_count: Optional[int] = None,
+        max_generation_time_ms: Optional[float] = None,
     ) -> Dict:
         args: Dict[str, Any] = {}
         if operator_only is not None:
@@ -296,37 +299,17 @@ class AgentForgeClient:
             args["max_actor_delta_per_pipeline"] = int(max_actor_delta_per_pipeline)
         if max_memory_used_mb is not None:
             args["max_memory_used_mb"] = float(max_memory_used_mb)
+        if max_spawn_points is not None:
+            args["max_spawn_points"] = int(max_spawn_points)
+        if max_cluster_count is not None:
+            args["max_cluster_count"] = int(max_cluster_count)
+        if max_generation_time_ms is not None:
+            args["max_generation_time_ms"] = float(max_generation_time_ms)
         return self._send("set_operator_policy", args)
 
-    def op_terrain_generate(
-        self,
-        seed: int = 48293,
-        width: int = 257,
-        height: int = 257,
-        frequency: float = 0.01,
-        amplitude: float = 1.0,
-        ridge_strength: float = 0.35,
-        erosion_iterations: int = 16,
-        erosion_strength: float = 0.35,
-        spawn_landscape: bool = False,
-    ) -> Dict:
-        return self._send("op_terrain_generate", {
-            "seed": int(seed),
-            "width": int(width),
-            "height": int(height),
-            "frequency": float(frequency),
-            "amplitude": float(amplitude),
-            "ridge_strength": float(ridge_strength),
-            "erosion_iterations": int(erosion_iterations),
-            "erosion_strength": float(erosion_strength),
-            "spawn_landscape": bool(spawn_landscape),
-        })
-
-    def op_surface_scatter(
-        self,
-        target_label: str,
-        parameters: Optional[Dict[str, Any]] = None,
-        generate: bool = True,
+    @staticmethod
+    def _apply_distribution_visual_args(
+        args: Dict[str, Any],
         distribution_mode: Optional[str] = None,
         density: Optional[float] = None,
         cluster_radius: Optional[float] = None,
@@ -336,12 +319,30 @@ class AgentForgeClient:
         distance_mask: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
         palette_id: Optional[str] = None,
-    ) -> Dict:
-        args: Dict[str, Any] = {
-            "target_label": target_label,
-            "parameters": parameters or {},
-            "generate": generate,
-        }
+        cluster_count: Optional[int] = None,
+        max_spawn_points: Optional[int] = None,
+        max_cluster_count: Optional[int] = None,
+        max_generation_time_ms: Optional[float] = None,
+        use_density_gradient: Optional[bool] = None,
+        density_sigma: Optional[float] = None,
+        density_noise: Optional[float] = None,
+        density_field_resolution: Optional[int] = None,
+        clearings: Optional[Dict[str, Any]] = None,
+        clearing_density: Optional[float] = None,
+        clearing_count: Optional[int] = None,
+        clearing_radius_min: Optional[float] = None,
+        clearing_radius_max: Optional[float] = None,
+        biome_count: Optional[int] = None,
+        biome_types: Optional[List[str]] = None,
+        allowed_biomes: Optional[List[str]] = None,
+        biome_blend_distance: Optional[float] = None,
+        avoid_points: Optional[List[Dict[str, float]]] = None,
+        avoid_radius: Optional[float] = None,
+        prefer_near_points: Optional[List[Dict[str, float]]] = None,
+        prefer_radius: Optional[float] = None,
+        prefer_strength: Optional[float] = None,
+        interaction_rules: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if distribution_mode is not None:
             args["distribution_mode"] = distribution_mode
         if density is not None:
@@ -360,6 +361,159 @@ class AgentForgeClient:
             args["seed"] = int(seed)
         if palette_id is not None:
             args["palette_id"] = palette_id
+        if cluster_count is not None:
+            args["cluster_count"] = int(cluster_count)
+        if max_spawn_points is not None:
+            args["max_spawn_points"] = int(max_spawn_points)
+        if max_cluster_count is not None:
+            args["max_cluster_count"] = int(max_cluster_count)
+        if max_generation_time_ms is not None:
+            args["max_generation_time_ms"] = float(max_generation_time_ms)
+        if use_density_gradient is not None:
+            args["use_density_gradient"] = bool(use_density_gradient)
+        if density_sigma is not None:
+            args["density_sigma"] = float(density_sigma)
+        if density_noise is not None:
+            args["density_noise"] = float(density_noise)
+        if density_field_resolution is not None:
+            args["density_field_resolution"] = int(density_field_resolution)
+        if clearings is not None:
+            args["clearings"] = clearings
+        if clearing_density is not None:
+            args["clearing_density"] = float(clearing_density)
+        if clearing_count is not None:
+            args["clearing_count"] = int(clearing_count)
+        if clearing_radius_min is not None:
+            args["clearing_radius_min"] = float(clearing_radius_min)
+        if clearing_radius_max is not None:
+            args["clearing_radius_max"] = float(clearing_radius_max)
+        if biome_count is not None:
+            args["biome_count"] = int(biome_count)
+        if biome_types is not None:
+            args["biome_types"] = biome_types
+        if allowed_biomes is not None:
+            args["allowed_biomes"] = allowed_biomes
+        if biome_blend_distance is not None:
+            args["biome_blend_distance"] = float(biome_blend_distance)
+        if avoid_points is not None:
+            args["avoid_points"] = avoid_points
+        if avoid_radius is not None:
+            args["avoid_radius"] = float(avoid_radius)
+        if prefer_near_points is not None:
+            args["prefer_near_points"] = prefer_near_points
+        if prefer_radius is not None:
+            args["prefer_radius"] = float(prefer_radius)
+        if prefer_strength is not None:
+            args["prefer_strength"] = float(prefer_strength)
+        if interaction_rules is not None:
+            args["interaction_rules"] = interaction_rules
+
+    def op_terrain_generate(
+        self,
+        seed: int = 48293,
+        width: int = 257,
+        height: int = 257,
+        frequency: float = 0.01,
+        amplitude: float = 1.0,
+        ridge_strength: float = 0.35,
+        erosion_iterations: int = 16,
+        erosion_strength: float = 0.35,
+        sediment_strength: Optional[float] = None,
+        spawn_landscape: bool = False,
+    ) -> Dict:
+        args = {
+            "seed": int(seed),
+            "width": int(width),
+            "height": int(height),
+            "frequency": float(frequency),
+            "amplitude": float(amplitude),
+            "ridge_strength": float(ridge_strength),
+            "erosion_iterations": int(erosion_iterations),
+            "erosion_strength": float(erosion_strength),
+            "spawn_landscape": bool(spawn_landscape),
+        }
+        if sediment_strength is not None:
+            args["sediment_strength"] = float(sediment_strength)
+        return self._send("op_terrain_generate", args)
+
+    def op_surface_scatter(
+        self,
+        target_label: str,
+        parameters: Optional[Dict[str, Any]] = None,
+        generate: bool = True,
+        distribution_mode: Optional[str] = None,
+        density: Optional[float] = None,
+        cluster_radius: Optional[float] = None,
+        min_spacing: Optional[float] = None,
+        height_range: Optional[List[float]] = None,
+        slope_range: Optional[List[float]] = None,
+        distance_mask: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        palette_id: Optional[str] = None,
+        cluster_count: Optional[int] = None,
+        max_spawn_points: Optional[int] = None,
+        max_cluster_count: Optional[int] = None,
+        max_generation_time_ms: Optional[float] = None,
+        use_density_gradient: Optional[bool] = None,
+        density_sigma: Optional[float] = None,
+        density_noise: Optional[float] = None,
+        density_field_resolution: Optional[int] = None,
+        clearings: Optional[Dict[str, Any]] = None,
+        clearing_density: Optional[float] = None,
+        clearing_count: Optional[int] = None,
+        clearing_radius_min: Optional[float] = None,
+        clearing_radius_max: Optional[float] = None,
+        biome_count: Optional[int] = None,
+        biome_types: Optional[List[str]] = None,
+        allowed_biomes: Optional[List[str]] = None,
+        biome_blend_distance: Optional[float] = None,
+        avoid_points: Optional[List[Dict[str, float]]] = None,
+        avoid_radius: Optional[float] = None,
+        prefer_near_points: Optional[List[Dict[str, float]]] = None,
+        prefer_radius: Optional[float] = None,
+        prefer_strength: Optional[float] = None,
+        interaction_rules: Optional[Dict[str, Any]] = None,
+    ) -> Dict:
+        args: Dict[str, Any] = {
+            "target_label": target_label,
+            "parameters": parameters or {},
+            "generate": generate,
+        }
+        self._apply_distribution_visual_args(
+            args,
+            distribution_mode=distribution_mode,
+            density=density,
+            cluster_radius=cluster_radius,
+            min_spacing=min_spacing,
+            height_range=height_range,
+            slope_range=slope_range,
+            distance_mask=distance_mask,
+            seed=seed,
+            palette_id=palette_id,
+            cluster_count=cluster_count,
+            max_spawn_points=max_spawn_points,
+            max_cluster_count=max_cluster_count,
+            max_generation_time_ms=max_generation_time_ms,
+            use_density_gradient=use_density_gradient,
+            density_sigma=density_sigma,
+            density_noise=density_noise,
+            density_field_resolution=density_field_resolution,
+            clearings=clearings,
+            clearing_density=clearing_density,
+            clearing_count=clearing_count,
+            clearing_radius_min=clearing_radius_min,
+            clearing_radius_max=clearing_radius_max,
+            biome_count=biome_count,
+            biome_types=biome_types,
+            allowed_biomes=allowed_biomes,
+            biome_blend_distance=biome_blend_distance,
+            avoid_points=avoid_points,
+            avoid_radius=avoid_radius,
+            prefer_near_points=prefer_near_points,
+            prefer_radius=prefer_radius,
+            prefer_strength=prefer_strength,
+            interaction_rules=interaction_rules,
+        )
         return self._send("op_surface_scatter", args)
 
     def op_spline_scatter(
@@ -378,6 +532,29 @@ class AgentForgeClient:
         distance_mask: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
         palette_id: Optional[str] = None,
+        cluster_count: Optional[int] = None,
+        max_spawn_points: Optional[int] = None,
+        max_cluster_count: Optional[int] = None,
+        max_generation_time_ms: Optional[float] = None,
+        use_density_gradient: Optional[bool] = None,
+        density_sigma: Optional[float] = None,
+        density_noise: Optional[float] = None,
+        density_field_resolution: Optional[int] = None,
+        clearings: Optional[Dict[str, Any]] = None,
+        clearing_density: Optional[float] = None,
+        clearing_count: Optional[int] = None,
+        clearing_radius_min: Optional[float] = None,
+        clearing_radius_max: Optional[float] = None,
+        biome_count: Optional[int] = None,
+        biome_types: Optional[List[str]] = None,
+        allowed_biomes: Optional[List[str]] = None,
+        biome_blend_distance: Optional[float] = None,
+        avoid_points: Optional[List[Dict[str, float]]] = None,
+        avoid_radius: Optional[float] = None,
+        prefer_near_points: Optional[List[Dict[str, float]]] = None,
+        prefer_radius: Optional[float] = None,
+        prefer_strength: Optional[float] = None,
+        interaction_rules: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         args: Dict[str, Any] = {
             "spline_actor_label": spline_actor_label,
@@ -387,24 +564,41 @@ class AgentForgeClient:
         }
         if control_points:
             args["control_points"] = control_points
-        if distribution_mode is not None:
-            args["distribution_mode"] = distribution_mode
-        if density is not None:
-            args["density"] = float(density)
-        if cluster_radius is not None:
-            args["cluster_radius"] = float(cluster_radius)
-        if min_spacing is not None:
-            args["min_spacing"] = float(min_spacing)
-        if height_range is not None:
-            args["height_range"] = height_range
-        if slope_range is not None:
-            args["slope_range"] = slope_range
-        if distance_mask is not None:
-            args["distance_mask"] = distance_mask
-        if seed is not None:
-            args["seed"] = int(seed)
-        if palette_id is not None:
-            args["palette_id"] = palette_id
+        self._apply_distribution_visual_args(
+            args,
+            distribution_mode=distribution_mode,
+            density=density,
+            cluster_radius=cluster_radius,
+            min_spacing=min_spacing,
+            height_range=height_range,
+            slope_range=slope_range,
+            distance_mask=distance_mask,
+            seed=seed,
+            palette_id=palette_id,
+            cluster_count=cluster_count,
+            max_spawn_points=max_spawn_points,
+            max_cluster_count=max_cluster_count,
+            max_generation_time_ms=max_generation_time_ms,
+            use_density_gradient=use_density_gradient,
+            density_sigma=density_sigma,
+            density_noise=density_noise,
+            density_field_resolution=density_field_resolution,
+            clearings=clearings,
+            clearing_density=clearing_density,
+            clearing_count=clearing_count,
+            clearing_radius_min=clearing_radius_min,
+            clearing_radius_max=clearing_radius_max,
+            biome_count=biome_count,
+            biome_types=biome_types,
+            allowed_biomes=allowed_biomes,
+            biome_blend_distance=biome_blend_distance,
+            avoid_points=avoid_points,
+            avoid_radius=avoid_radius,
+            prefer_near_points=prefer_near_points,
+            prefer_radius=prefer_radius,
+            prefer_strength=prefer_strength,
+            interaction_rules=interaction_rules,
+        )
         return self._send("op_spline_scatter", args)
 
     def op_road_layout(
@@ -441,30 +635,70 @@ class AgentForgeClient:
         distance_mask: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
         palette_id: Optional[str] = None,
+        cluster_count: Optional[int] = None,
+        max_spawn_points: Optional[int] = None,
+        max_cluster_count: Optional[int] = None,
+        max_generation_time_ms: Optional[float] = None,
+        use_density_gradient: Optional[bool] = None,
+        density_sigma: Optional[float] = None,
+        density_noise: Optional[float] = None,
+        density_field_resolution: Optional[int] = None,
+        clearings: Optional[Dict[str, Any]] = None,
+        clearing_density: Optional[float] = None,
+        clearing_count: Optional[int] = None,
+        clearing_radius_min: Optional[float] = None,
+        clearing_radius_max: Optional[float] = None,
+        biome_count: Optional[int] = None,
+        biome_types: Optional[List[str]] = None,
+        allowed_biomes: Optional[List[str]] = None,
+        biome_blend_distance: Optional[float] = None,
+        avoid_points: Optional[List[Dict[str, float]]] = None,
+        avoid_radius: Optional[float] = None,
+        prefer_near_points: Optional[List[Dict[str, float]]] = None,
+        prefer_radius: Optional[float] = None,
+        prefer_strength: Optional[float] = None,
+        interaction_rules: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         args: Dict[str, Any] = {"target_label": target_label, "generate": generate}
         if layers:
             args["layers"] = layers
         if parameters:
             args["parameters"] = parameters
-        if distribution_mode is not None:
-            args["distribution_mode"] = distribution_mode
-        if density is not None:
-            args["density"] = float(density)
-        if cluster_radius is not None:
-            args["cluster_radius"] = float(cluster_radius)
-        if min_spacing is not None:
-            args["min_spacing"] = float(min_spacing)
-        if height_range is not None:
-            args["height_range"] = height_range
-        if slope_range is not None:
-            args["slope_range"] = slope_range
-        if distance_mask is not None:
-            args["distance_mask"] = distance_mask
-        if seed is not None:
-            args["seed"] = int(seed)
-        if palette_id is not None:
-            args["palette_id"] = palette_id
+        self._apply_distribution_visual_args(
+            args,
+            distribution_mode=distribution_mode,
+            density=density,
+            cluster_radius=cluster_radius,
+            min_spacing=min_spacing,
+            height_range=height_range,
+            slope_range=slope_range,
+            distance_mask=distance_mask,
+            seed=seed,
+            palette_id=palette_id,
+            cluster_count=cluster_count,
+            max_spawn_points=max_spawn_points,
+            max_cluster_count=max_cluster_count,
+            max_generation_time_ms=max_generation_time_ms,
+            use_density_gradient=use_density_gradient,
+            density_sigma=density_sigma,
+            density_noise=density_noise,
+            density_field_resolution=density_field_resolution,
+            clearings=clearings,
+            clearing_density=clearing_density,
+            clearing_count=clearing_count,
+            clearing_radius_min=clearing_radius_min,
+            clearing_radius_max=clearing_radius_max,
+            biome_count=biome_count,
+            biome_types=biome_types,
+            allowed_biomes=allowed_biomes,
+            biome_blend_distance=biome_blend_distance,
+            avoid_points=avoid_points,
+            avoid_radius=avoid_radius,
+            prefer_near_points=prefer_near_points,
+            prefer_radius=prefer_radius,
+            prefer_strength=prefer_strength,
+            interaction_rules=interaction_rules,
+        )
         return self._send("op_biome_layers", args)
 
     def op_stamp_poi(
@@ -506,6 +740,29 @@ class AgentForgeClient:
         height_range: Optional[List[float]] = None,
         slope_range: Optional[List[float]] = None,
         distance_mask: Optional[Dict[str, Any]] = None,
+        cluster_count: Optional[int] = None,
+        max_spawn_points: Optional[int] = None,
+        max_cluster_count: Optional[int] = None,
+        max_generation_time_ms: Optional[float] = None,
+        use_density_gradient: Optional[bool] = None,
+        density_sigma: Optional[float] = None,
+        density_noise: Optional[float] = None,
+        density_field_resolution: Optional[int] = None,
+        clearings: Optional[Dict[str, Any]] = None,
+        clearing_density: Optional[float] = None,
+        clearing_count: Optional[int] = None,
+        clearing_radius_min: Optional[float] = None,
+        clearing_radius_max: Optional[float] = None,
+        biome_count: Optional[int] = None,
+        biome_types: Optional[List[str]] = None,
+        allowed_biomes: Optional[List[str]] = None,
+        biome_blend_distance: Optional[float] = None,
+        avoid_points: Optional[List[Dict[str, float]]] = None,
+        avoid_radius: Optional[float] = None,
+        prefer_near_points: Optional[List[Dict[str, float]]] = None,
+        prefer_radius: Optional[float] = None,
+        prefer_strength: Optional[float] = None,
+        interaction_rules: Optional[Dict[str, Any]] = None,
         stop_on_error: bool = True,
         max_actor_delta: Optional[int] = None,
         max_memory_used_mb: Optional[float] = None,
@@ -527,20 +784,39 @@ class AgentForgeClient:
             args["seed"] = int(seed)
         if palette_id is not None:
             args["palette_id"] = palette_id
-        if distribution_mode is not None:
-            args["distribution_mode"] = distribution_mode
-        if density is not None:
-            args["density"] = float(density)
-        if cluster_radius is not None:
-            args["cluster_radius"] = float(cluster_radius)
-        if min_spacing is not None:
-            args["min_spacing"] = float(min_spacing)
-        if height_range is not None:
-            args["height_range"] = height_range
-        if slope_range is not None:
-            args["slope_range"] = slope_range
-        if distance_mask is not None:
-            args["distance_mask"] = distance_mask
+        self._apply_distribution_visual_args(
+            args,
+            distribution_mode=distribution_mode,
+            density=density,
+            cluster_radius=cluster_radius,
+            min_spacing=min_spacing,
+            height_range=height_range,
+            slope_range=slope_range,
+            distance_mask=distance_mask,
+            cluster_count=cluster_count,
+            max_spawn_points=max_spawn_points,
+            max_cluster_count=max_cluster_count,
+            max_generation_time_ms=max_generation_time_ms,
+            use_density_gradient=use_density_gradient,
+            density_sigma=density_sigma,
+            density_noise=density_noise,
+            density_field_resolution=density_field_resolution,
+            clearings=clearings,
+            clearing_density=clearing_density,
+            clearing_count=clearing_count,
+            clearing_radius_min=clearing_radius_min,
+            clearing_radius_max=clearing_radius_max,
+            biome_count=biome_count,
+            biome_types=biome_types,
+            allowed_biomes=allowed_biomes,
+            biome_blend_distance=biome_blend_distance,
+            avoid_points=avoid_points,
+            avoid_radius=avoid_radius,
+            prefer_near_points=prefer_near_points,
+            prefer_radius=prefer_radius,
+            prefer_strength=prefer_strength,
+            interaction_rules=interaction_rules,
+        )
         if max_actor_delta is not None:
             args["max_actor_delta"] = int(max_actor_delta)
         if max_memory_used_mb is not None:

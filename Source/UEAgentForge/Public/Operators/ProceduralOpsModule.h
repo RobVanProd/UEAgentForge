@@ -21,8 +21,10 @@ public:
 	static FString GetProceduralCapabilities(const TSharedPtr<FJsonObject>& Args);
 	static FString GetOperatorPolicy();
 	static FString SetOperatorPolicy(const TSharedPtr<FJsonObject>& Args);
+	static bool IsOperatorOnlyMode();
 
 	// Constrained operators
+	static FString TerrainGenerate(const TSharedPtr<FJsonObject>& Args);
 	static FString SurfaceScatter(const TSharedPtr<FJsonObject>& Args);
 	static FString SplineScatter(const TSharedPtr<FJsonObject>& Args);
 	static FString RoadLayout(const TSharedPtr<FJsonObject>& Args);

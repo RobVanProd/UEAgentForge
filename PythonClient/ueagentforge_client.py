@@ -247,11 +247,15 @@ class AgentForgeClient:
         max_actors: int = 120,
         max_relationships: int = 48,
         include_components: bool = False,
+        include_screenshot: bool = True,
+        screenshot_label: str = "world_context",
     ) -> Dict:
         return self._send("get_world_context", {
             "max_actors": int(max_actors),
             "max_relationships": int(max_relationships),
             "include_components": bool(include_components),
+            "include_screenshot": bool(include_screenshot),
+            "screenshot_label": screenshot_label,
         })
 
     def assert_current_level(self, expected_level: str) -> Dict:
@@ -294,17 +298,69 @@ class AgentForgeClient:
             args["max_memory_used_mb"] = float(max_memory_used_mb)
         return self._send("set_operator_policy", args)
 
+    def op_terrain_generate(
+        self,
+        seed: int = 48293,
+        width: int = 257,
+        height: int = 257,
+        frequency: float = 0.01,
+        amplitude: float = 1.0,
+        ridge_strength: float = 0.35,
+        erosion_iterations: int = 16,
+        erosion_strength: float = 0.35,
+        spawn_landscape: bool = False,
+    ) -> Dict:
+        return self._send("op_terrain_generate", {
+            "seed": int(seed),
+            "width": int(width),
+            "height": int(height),
+            "frequency": float(frequency),
+            "amplitude": float(amplitude),
+            "ridge_strength": float(ridge_strength),
+            "erosion_iterations": int(erosion_iterations),
+            "erosion_strength": float(erosion_strength),
+            "spawn_landscape": bool(spawn_landscape),
+        })
+
     def op_surface_scatter(
         self,
         target_label: str,
         parameters: Optional[Dict[str, Any]] = None,
         generate: bool = True,
+        distribution_mode: Optional[str] = None,
+        density: Optional[float] = None,
+        cluster_radius: Optional[float] = None,
+        min_spacing: Optional[float] = None,
+        height_range: Optional[List[float]] = None,
+        slope_range: Optional[List[float]] = None,
+        distance_mask: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        palette_id: Optional[str] = None,
     ) -> Dict:
-        return self._send("op_surface_scatter", {
+        args: Dict[str, Any] = {
             "target_label": target_label,
             "parameters": parameters or {},
             "generate": generate,
-        })
+        }
+        if distribution_mode is not None:
+            args["distribution_mode"] = distribution_mode
+        if density is not None:
+            args["density"] = float(density)
+        if cluster_radius is not None:
+            args["cluster_radius"] = float(cluster_radius)
+        if min_spacing is not None:
+            args["min_spacing"] = float(min_spacing)
+        if height_range is not None:
+            args["height_range"] = height_range
+        if slope_range is not None:
+            args["slope_range"] = slope_range
+        if distance_mask is not None:
+            args["distance_mask"] = distance_mask
+        if seed is not None:
+            args["seed"] = int(seed)
+        if palette_id is not None:
+            args["palette_id"] = palette_id
+        return self._send("op_surface_scatter", args)
 
     def op_spline_scatter(
         self,
@@ -313,6 +369,15 @@ class AgentForgeClient:
         parameters: Optional[Dict[str, Any]] = None,
         closed_loop: bool = False,
         generate: bool = True,
+        distribution_mode: Optional[str] = None,
+        density: Optional[float] = None,
+        cluster_radius: Optional[float] = None,
+        min_spacing: Optional[float] = None,
+        height_range: Optional[List[float]] = None,
+        slope_range: Optional[List[float]] = None,
+        distance_mask: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        palette_id: Optional[str] = None,
     ) -> Dict:
         args: Dict[str, Any] = {
             "spline_actor_label": spline_actor_label,
@@ -322,6 +387,24 @@ class AgentForgeClient:
         }
         if control_points:
             args["control_points"] = control_points
+        if distribution_mode is not None:
+            args["distribution_mode"] = distribution_mode
+        if density is not None:
+            args["density"] = float(density)
+        if cluster_radius is not None:
+            args["cluster_radius"] = float(cluster_radius)
+        if min_spacing is not None:
+            args["min_spacing"] = float(min_spacing)
+        if height_range is not None:
+            args["height_range"] = height_range
+        if slope_range is not None:
+            args["slope_range"] = slope_range
+        if distance_mask is not None:
+            args["distance_mask"] = distance_mask
+        if seed is not None:
+            args["seed"] = int(seed)
+        if palette_id is not None:
+            args["palette_id"] = palette_id
         return self._send("op_spline_scatter", args)
 
     def op_road_layout(
@@ -349,12 +432,39 @@ class AgentForgeClient:
         layers: Optional[Dict[str, Any]] = None,
         parameters: Optional[Dict[str, Any]] = None,
         generate: bool = True,
+        distribution_mode: Optional[str] = None,
+        density: Optional[float] = None,
+        cluster_radius: Optional[float] = None,
+        min_spacing: Optional[float] = None,
+        height_range: Optional[List[float]] = None,
+        slope_range: Optional[List[float]] = None,
+        distance_mask: Optional[Dict[str, Any]] = None,
+        seed: Optional[int] = None,
+        palette_id: Optional[str] = None,
     ) -> Dict:
         args: Dict[str, Any] = {"target_label": target_label, "generate": generate}
         if layers:
             args["layers"] = layers
         if parameters:
             args["parameters"] = parameters
+        if distribution_mode is not None:
+            args["distribution_mode"] = distribution_mode
+        if density is not None:
+            args["density"] = float(density)
+        if cluster_radius is not None:
+            args["cluster_radius"] = float(cluster_radius)
+        if min_spacing is not None:
+            args["min_spacing"] = float(min_spacing)
+        if height_range is not None:
+            args["height_range"] = height_range
+        if slope_range is not None:
+            args["slope_range"] = slope_range
+        if distance_mask is not None:
+            args["distance_mask"] = distance_mask
+        if seed is not None:
+            args["seed"] = int(seed)
+        if palette_id is not None:
+            args["palette_id"] = palette_id
         return self._send("op_biome_layers", args)
 
     def op_stamp_poi(
@@ -381,6 +491,7 @@ class AgentForgeClient:
 
     def run_operator_pipeline(
         self,
+        terrain: Optional[Dict[str, Any]] = None,
         surface: Optional[Dict[str, Any]] = None,
         spline: Optional[Dict[str, Any]] = None,
         roads: Optional[Dict[str, Any]] = None,
@@ -388,11 +499,20 @@ class AgentForgeClient:
         poi: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
         palette_id: Optional[str] = None,
+        distribution_mode: Optional[str] = None,
+        density: Optional[float] = None,
+        cluster_radius: Optional[float] = None,
+        min_spacing: Optional[float] = None,
+        height_range: Optional[List[float]] = None,
+        slope_range: Optional[List[float]] = None,
+        distance_mask: Optional[Dict[str, Any]] = None,
         stop_on_error: bool = True,
         max_actor_delta: Optional[int] = None,
         max_memory_used_mb: Optional[float] = None,
     ) -> Dict:
         args: Dict[str, Any] = {"stop_on_error": stop_on_error}
+        if terrain is not None:
+            args["terrain"] = terrain
         if surface is not None:
             args["surface"] = surface
         if spline is not None:
@@ -407,6 +527,20 @@ class AgentForgeClient:
             args["seed"] = int(seed)
         if palette_id is not None:
             args["palette_id"] = palette_id
+        if distribution_mode is not None:
+            args["distribution_mode"] = distribution_mode
+        if density is not None:
+            args["density"] = float(density)
+        if cluster_radius is not None:
+            args["cluster_radius"] = float(cluster_radius)
+        if min_spacing is not None:
+            args["min_spacing"] = float(min_spacing)
+        if height_range is not None:
+            args["height_range"] = height_range
+        if slope_range is not None:
+            args["slope_range"] = slope_range
+        if distance_mask is not None:
+            args["distance_mask"] = distance_mask
         if max_actor_delta is not None:
             args["max_actor_delta"] = int(max_actor_delta)
         if max_memory_used_mb is not None:

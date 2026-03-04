@@ -2,7 +2,10 @@
 // Copyright UEAgentForge Project. All Rights Reserved.
 // ProceduralOpsModule.cpp - deterministic operator-centric procedural workflow.
 
-#include "ProceduralOpsModule.h"
+#include "Operators/ProceduralOpsModule.h"
+#include "Distribution/DistributionEngine.h"
+#include "Palette/PaletteManager.h"
+#include "Terrain/TerrainGenerator.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -16,6 +19,7 @@
 #include "Misc/Paths.h"
 #include "UObject/UnrealType.h"
 #include "UObject/UObjectGlobals.h"
+#include <limits>
 
 #if WITH_EDITOR
 #include "Editor.h"
@@ -587,6 +591,224 @@ namespace
 			Actor->Tags.Add(Tag);
 		}
 	}
+
+	struct FDistributionRequest
+	{
+		FString Mode = TEXT("blue_noise");
+		float Density = 0.25f;
+		float ClusterRadius = 400.0f;
+		float MinSpacing = 220.0f;
+		int32 Seed = 1337;
+		int32 ExplicitPointCount = 0;
+
+		bool bUseHeightRange = false;
+		float MinHeight = -1000000.0f;
+		float MaxHeight = 1000000.0f;
+
+		bool bUseSlopeRange = false;
+		float MinSlope = 0.0f;
+		float MaxSlope = 90.0f;
+
+		bool bUseDistanceMask = false;
+		FVector DistanceOrigin = FVector::ZeroVector;
+		float MinDistance = 0.0f;
+		float MaxDistance = 1000000.0f;
+	};
+
+	static bool ParseNumericArrayRange(const TSharedPtr<FJsonObject>& Args, const FString& Field, float& OutMin, float& OutMax)
+	{
+		const TArray<TSharedPtr<FJsonValue>>* RangeArr = nullptr;
+		if (!Args.IsValid() || !Args->TryGetArrayField(Field, RangeArr) || !RangeArr || RangeArr->Num() < 2)
+		{
+			return false;
+		}
+		if (!(*RangeArr)[0].IsValid() || !(*RangeArr)[1].IsValid())
+		{
+			return false;
+		}
+		const double MinVal = (*RangeArr)[0]->AsNumber();
+		const double MaxVal = (*RangeArr)[1]->AsNumber();
+		OutMin = (float)FMath::Min(MinVal, MaxVal);
+		OutMax = (float)FMath::Max(MinVal, MaxVal);
+		return true;
+	}
+
+	static FDistributionRequest ParseDistributionRequest(const TSharedPtr<FJsonObject>& Args, AActor* TargetActor)
+	{
+		FDistributionRequest Request;
+		if (!Args.IsValid())
+		{
+			if (TargetActor)
+			{
+				Request.DistanceOrigin = TargetActor->GetActorLocation();
+			}
+			return Request;
+		}
+
+		Args->TryGetStringField(TEXT("distribution_mode"), Request.Mode);
+		if (Args->HasField(TEXT("density")))
+		{
+			Request.Density = FMath::Clamp((float)Args->GetNumberField(TEXT("density")), 0.0f, 1000.0f);
+		}
+		if (Args->HasField(TEXT("cluster_radius")))
+		{
+			Request.ClusterRadius = FMath::Max(1.0f, (float)Args->GetNumberField(TEXT("cluster_radius")));
+		}
+		if (Args->HasField(TEXT("min_spacing")))
+		{
+			Request.MinSpacing = FMath::Max(1.0f, (float)Args->GetNumberField(TEXT("min_spacing")));
+		}
+		if (Args->HasField(TEXT("seed")))
+		{
+			Request.Seed = (int32)Args->GetNumberField(TEXT("seed"));
+		}
+		if (Args->HasField(TEXT("point_count")))
+		{
+			Request.ExplicitPointCount = FMath::Max(0, (int32)Args->GetNumberField(TEXT("point_count")));
+		}
+		else if (Args->HasField(TEXT("max_points")))
+		{
+			Request.ExplicitPointCount = FMath::Max(0, (int32)Args->GetNumberField(TEXT("max_points")));
+		}
+
+		if (ParseNumericArrayRange(Args, TEXT("height_range"), Request.MinHeight, Request.MaxHeight))
+		{
+			Request.bUseHeightRange = true;
+		}
+
+		if (ParseNumericArrayRange(Args, TEXT("slope_range"), Request.MinSlope, Request.MaxSlope))
+		{
+			Request.bUseSlopeRange = true;
+		}
+
+		if (Args->HasField(TEXT("distance_mask")))
+		{
+			const TSharedPtr<FJsonObject>* DistObj = nullptr;
+			if (Args->TryGetObjectField(TEXT("distance_mask"), DistObj) && DistObj && DistObj->IsValid())
+			{
+				Request.bUseDistanceMask = true;
+				if ((*DistObj)->HasField(TEXT("min")))
+				{
+					Request.MinDistance = FMath::Max(0.0f, (float)(*DistObj)->GetNumberField(TEXT("min")));
+				}
+				if ((*DistObj)->HasField(TEXT("max")))
+				{
+					Request.MaxDistance = FMath::Max(Request.MinDistance, (float)(*DistObj)->GetNumberField(TEXT("max")));
+				}
+
+				FVector ParsedOrigin = FVector::ZeroVector;
+				if ((*DistObj)->HasField(TEXT("origin")) && JsonValueToVector((*DistObj)->TryGetField(TEXT("origin")), ParsedOrigin))
+				{
+					Request.DistanceOrigin = ParsedOrigin;
+				}
+			}
+		}
+
+		if (TargetActor && !Request.bUseDistanceMask)
+		{
+			Request.DistanceOrigin = TargetActor->GetActorLocation();
+		}
+
+		return Request;
+	}
+
+	static TArray<FVector> GenerateDistributionPoints(UWorld* World, AActor* TargetActor, const FDistributionRequest& Request)
+	{
+		TArray<FVector> Points;
+		if (!TargetActor)
+		{
+			return Points;
+		}
+
+		FVector Origin = FVector::ZeroVector;
+		FVector Extent = FVector(2000.0f, 2000.0f, 500.0f);
+		TargetActor->GetActorBounds(true, Origin, Extent);
+		Extent.X = FMath::Max(Extent.X, 200.0f);
+		Extent.Y = FMath::Max(Extent.Y, 200.0f);
+		Extent.Z = FMath::Max(Extent.Z, 200.0f);
+
+		FBox Bounds(Origin - Extent, Origin + Extent);
+		const float AreaM2 = (Extent.X * 2.0f * Extent.Y * 2.0f) / 10000.0f;
+		const int32 EstimatedByDensity = FMath::Clamp(FMath::RoundToInt(AreaM2 * Request.Density), 1, 100000);
+		const int32 TargetCount = Request.ExplicitPointCount > 0 ? Request.ExplicitPointCount : EstimatedByDensity;
+
+		const FString ModeLower = Request.Mode.ToLower();
+		if (ModeLower == TEXT("cluster") || ModeLower == TEXT("clustered"))
+		{
+			const int32 ClusterCount = FMath::Clamp(FMath::RoundToInt(FMath::Sqrt((float)TargetCount) * 0.35f), 1, 256);
+			const TArray<FVector> Clustered = FDistributionEngine::GenerateClusterPoints(Bounds, TargetCount, ClusterCount, Request.ClusterRadius, Request.Seed);
+			const float MinDistSq = FMath::Square(FMath::Max(1.0f, Request.MinSpacing));
+			for (const FVector& Candidate : Clustered)
+			{
+				bool bAccept = true;
+				for (const FVector& Existing : Points)
+				{
+					if (FVector::DistSquared2D(Candidate, Existing) < MinDistSq)
+					{
+						bAccept = false;
+						break;
+					}
+				}
+				if (bAccept)
+				{
+					Points.Add(Candidate);
+				}
+			}
+		}
+		else if (ModeLower == TEXT("poisson") || ModeLower == TEXT("poisson_disk") || ModeLower == TEXT("poisson_disk_sampling"))
+		{
+			Points = FDistributionEngine::GeneratePoissonDiskPoints(Bounds, TargetCount, Request.MinSpacing, Request.Seed);
+		}
+		else
+		{
+			Points = FDistributionEngine::GenerateBlueNoisePoints(Bounds, TargetCount, Request.Seed, Request.MinSpacing);
+		}
+
+		if (Request.bUseHeightRange)
+		{
+			Points = FDistributionEngine::ApplyHeightFilter(Points, Request.MinHeight, Request.MaxHeight);
+		}
+		if (Request.bUseSlopeRange)
+		{
+			Points = FDistributionEngine::ApplySlopeFilter(Points, World, Request.MinSlope, Request.MaxSlope);
+		}
+		if (Request.bUseDistanceMask)
+		{
+			Points = FDistributionEngine::ApplyDistanceMask(Points, Request.DistanceOrigin, Request.MinDistance, Request.MaxDistance);
+		}
+
+		return Points;
+	}
+
+	static TArray<TSharedPtr<FJsonValue>> BuildPointSampleArray(const TArray<FVector>& Points, int32 MaxPoints = 64)
+	{
+		TArray<TSharedPtr<FJsonValue>> Arr;
+		const int32 Count = FMath::Min(MaxPoints, Points.Num());
+		Arr.Reserve(Count);
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			Arr.Add(MakeShared<FJsonValueObject>(VecToObj(Points[Index])));
+		}
+		return Arr;
+	}
+
+	static bool ResolvePaletteIfPresent(const TSharedPtr<FJsonObject>& Args, FString& OutPaletteId, TSharedPtr<FJsonObject>& OutPalette, FString& OutPaletteError)
+	{
+		OutPaletteId = TEXT("");
+		OutPalette.Reset();
+		OutPaletteError = TEXT("");
+
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("palette_id"), OutPaletteId) || OutPaletteId.IsEmpty())
+		{
+			return true;
+		}
+
+		if (!FPaletteManager::LoadPaletteById(OutPaletteId, OutPalette, OutPaletteError))
+		{
+			return false;
+		}
+		return true;
+	}
 #endif // WITH_EDITOR
 }
 
@@ -628,6 +850,11 @@ FString FProceduralOpsModule::SetOperatorPolicy(const TSharedPtr<FJsonObject>& A
 		}
 	}
 	return GetOperatorPolicy();
+}
+
+bool FProceduralOpsModule::IsOperatorOnlyMode()
+{
+	return GOperatorPolicy.bOperatorOnly;
 }
 
 FString FProceduralOpsModule::GetProceduralCapabilities(const TSharedPtr<FJsonObject>& Args)
@@ -739,6 +966,7 @@ FString FProceduralOpsModule::GetProceduralCapabilities(const TSharedPtr<FJsonOb
 	OperatorSupport->SetStringField(TEXT("spline_scatter"), bPCGReady ? TEXT("native") : TEXT("unavailable"));
 	OperatorSupport->SetStringField(TEXT("road_layout"), bRoadReady ? TEXT("plugin") : TEXT("spline_fallback"));
 	OperatorSupport->SetStringField(TEXT("biome_layers"), bLayeredReady ? TEXT("plugin") : (bPCGReady ? TEXT("native_fallback") : TEXT("unavailable")));
+	OperatorSupport->SetStringField(TEXT("terrain_generate"), TEXT("native_baseline"));
 	OperatorSupport->SetStringField(TEXT("stamp_poi"), TEXT("native"));
 	OperatorSupport->SetStringField(TEXT("run_operator_pipeline"), TEXT("native"));
 	Root->SetObjectField(TEXT("operator_support"), OperatorSupport);
@@ -755,6 +983,80 @@ FString FProceduralOpsModule::GetProceduralCapabilities(const TSharedPtr<FJsonOb
 
 	Root->SetObjectField(TEXT("policy"), ParseJsonObjectOrNull(GetOperatorPolicy()));
 	return ToJson(Root);
+}
+
+FString FProceduralOpsModule::TerrainGenerate(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	UWorld* World = GetEditorWorld();
+	if (!World)
+	{
+		return ErrorJson(TEXT("No editor world."));
+	}
+
+	const int32 Seed = (Args.IsValid() && Args->HasField(TEXT("seed"))) ? (int32)Args->GetNumberField(TEXT("seed")) : 48293;
+	const int32 Width = (Args.IsValid() && Args->HasField(TEXT("width"))) ? (int32)Args->GetNumberField(TEXT("width")) : 257;
+	const int32 Height = (Args.IsValid() && Args->HasField(TEXT("height"))) ? (int32)Args->GetNumberField(TEXT("height")) : 257;
+	const float Frequency = (Args.IsValid() && Args->HasField(TEXT("frequency"))) ? (float)Args->GetNumberField(TEXT("frequency")) : 0.01f;
+	const float Amplitude = (Args.IsValid() && Args->HasField(TEXT("amplitude"))) ? (float)Args->GetNumberField(TEXT("amplitude")) : 1.0f;
+	const float RidgeStrength = (Args.IsValid() && Args->HasField(TEXT("ridge_strength"))) ? (float)Args->GetNumberField(TEXT("ridge_strength")) : 0.35f;
+	const int32 ErosionIterations = (Args.IsValid() && Args->HasField(TEXT("erosion_iterations"))) ? (int32)Args->GetNumberField(TEXT("erosion_iterations")) : 16;
+	const float ErosionStrength = (Args.IsValid() && Args->HasField(TEXT("erosion_strength"))) ? (float)Args->GetNumberField(TEXT("erosion_strength")) : 0.35f;
+	const bool bSpawnLandscape = (Args.IsValid() && Args->HasField(TEXT("spawn_landscape"))) ? Args->GetBoolField(TEXT("spawn_landscape")) : false;
+
+	TArray<float> Heightmap = FTerrainGenerator::GenerateHeightmap(Width, Height, Seed, Frequency, Amplitude);
+	FTerrainGenerator::ApplyRidgedNoise(Heightmap, Width, Height, Seed ^ 0x18A1F6C3, RidgeStrength);
+	FTerrainGenerator::ApplyErosion(Heightmap, Width, Height, ErosionIterations, ErosionStrength);
+	FTerrainGenerator::NormalizeHeightmap(Heightmap, 0.0f, 1.0f);
+
+	float MinH = TNumericLimits<float>::Max();
+	float MaxH = TNumericLimits<float>::Lowest();
+	float AvgH = 0.0f;
+	for (const float Value : Heightmap)
+	{
+		MinH = FMath::Min(MinH, Value);
+		MaxH = FMath::Max(MaxH, Value);
+		AvgH += Value;
+	}
+	if (Heightmap.Num() > 0)
+	{
+		AvgH /= (float)Heightmap.Num();
+	}
+
+	bool bLandscapeSpawned = false;
+	FString SpawnMessage = TEXT("spawn_landscape=false");
+	if (bSpawnLandscape)
+	{
+		bLandscapeSpawned = FTerrainGenerator::SpawnLandscape(
+			World,
+			Heightmap,
+			Width,
+			Height,
+			FVector::ZeroVector,
+			FVector(100.0f, 100.0f, 100.0f),
+			SpawnMessage);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("operator"), TEXT("terrain_generate"));
+	Root->SetNumberField(TEXT("seed"), Seed);
+	Root->SetNumberField(TEXT("width"), Width);
+	Root->SetNumberField(TEXT("height"), Height);
+	Root->SetNumberField(TEXT("frequency"), Frequency);
+	Root->SetNumberField(TEXT("amplitude"), Amplitude);
+	Root->SetNumberField(TEXT("ridge_strength"), RidgeStrength);
+	Root->SetNumberField(TEXT("erosion_iterations"), ErosionIterations);
+	Root->SetNumberField(TEXT("erosion_strength"), ErosionStrength);
+	Root->SetNumberField(TEXT("height_min"), MinH);
+	Root->SetNumberField(TEXT("height_max"), MaxH);
+	Root->SetNumberField(TEXT("height_avg"), AvgH);
+	Root->SetBoolField(TEXT("landscape_spawned"), bLandscapeSpawned);
+	Root->SetStringField(TEXT("landscape_message"), SpawnMessage);
+	return ToJson(Root);
+#else
+	return ErrorJson(TEXT("WITH_EDITOR required."));
+#endif
 }
 
 FString FProceduralOpsModule::SurfaceScatter(const TSharedPtr<FJsonObject>& Args)
@@ -778,9 +1080,24 @@ FString FProceduralOpsModule::SurfaceScatter(const TSharedPtr<FJsonObject>& Args
 		return ErrorJson(FString::Printf(TEXT("Target actor not found: %s"), *TargetId));
 	}
 
+	const FDistributionRequest Distribution = ParseDistributionRequest(Args, TargetActor);
+	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution);
+
+	FString PaletteId;
+	TSharedPtr<FJsonObject> PaletteObj;
+	FString PaletteError;
+	if (!ResolvePaletteIfPresent(Args, PaletteId, PaletteObj, PaletteError))
+	{
+		return ErrorJson(PaletteError);
+	}
+
 	const TSet<FString> Reserved = {
 		TEXT("target_label"), TEXT("pcg_volume_label"), TEXT("actor_label"), TEXT("target_actor"),
-		TEXT("parameters"), TEXT("generate")
+		TEXT("parameters"), TEXT("generate"),
+		TEXT("distribution_mode"), TEXT("density"), TEXT("cluster_radius"), TEXT("min_spacing"),
+		TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("seed"),
+		TEXT("point_count"), TEXT("max_points"),
+		TEXT("palette_id")
 	};
 
 	TMap<FString, TSharedPtr<FJsonValue>> Params;
@@ -823,6 +1140,14 @@ FString FProceduralOpsModule::SurfaceScatter(const TSharedPtr<FJsonObject>& Args
 	Root->SetArrayField(TEXT("missing"), MissingArr);
 	Root->SetBoolField(TEXT("generated"), bGenerate);
 	Root->SetNumberField(TEXT("generated_components"), Triggered);
+	Root->SetStringField(TEXT("distribution_mode"), Distribution.Mode);
+	Root->SetNumberField(TEXT("distribution_points"), DistributionPoints.Num());
+	Root->SetArrayField(TEXT("distribution_point_sample"), BuildPointSampleArray(DistributionPoints));
+	if (!PaletteId.IsEmpty())
+	{
+		Root->SetStringField(TEXT("palette_id"), PaletteId);
+		Root->SetBoolField(TEXT("palette_resolved"), PaletteObj.IsValid());
+	}
 	return ToJson(Root);
 #else
 	return ErrorJson(TEXT("WITH_EDITOR required."));
@@ -850,6 +1175,17 @@ FString FProceduralOpsModule::SplineScatter(const TSharedPtr<FJsonObject>& Args)
 		return ErrorJson(FString::Printf(TEXT("Spline actor not found: %s"), *TargetId));
 	}
 
+	const FDistributionRequest Distribution = ParseDistributionRequest(Args, TargetActor);
+	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution);
+
+	FString PaletteId;
+	TSharedPtr<FJsonObject> PaletteObj;
+	FString PaletteError;
+	if (!ResolvePaletteIfPresent(Args, PaletteId, PaletteObj, PaletteError))
+	{
+		return ErrorJson(PaletteError);
+	}
+
 	const bool bClosedLoop = Args.IsValid() && Args->HasField(TEXT("closed_loop")) ? Args->GetBoolField(TEXT("closed_loop")) : false;
 	int32 SplinePointCount = 0;
 
@@ -861,11 +1197,25 @@ FString FProceduralOpsModule::SplineScatter(const TSharedPtr<FJsonObject>& Args)
 			SplinePointCount = ApplySplinePoints(TargetActor, *Points, bClosedLoop);
 		}
 	}
+	if (SplinePointCount == 0 && DistributionPoints.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> GeneratedPointValues;
+		GeneratedPointValues.Reserve(DistributionPoints.Num());
+		for (const FVector& Point : DistributionPoints)
+		{
+			GeneratedPointValues.Add(MakeShared<FJsonValueObject>(VecToObj(Point)));
+		}
+		SplinePointCount = ApplySplinePoints(TargetActor, GeneratedPointValues, bClosedLoop);
+	}
 
 	const TSet<FString> Reserved = {
 		TEXT("spline_actor_label"), TEXT("target_label"), TEXT("actor_label"), TEXT("target_actor"),
 		TEXT("control_points"), TEXT("spline_points"), TEXT("closed_loop"),
-		TEXT("parameters"), TEXT("generate")
+		TEXT("parameters"), TEXT("generate"),
+		TEXT("distribution_mode"), TEXT("density"), TEXT("cluster_radius"), TEXT("min_spacing"),
+		TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("seed"),
+		TEXT("point_count"), TEXT("max_points"),
+		TEXT("palette_id")
 	};
 
 	TMap<FString, TSharedPtr<FJsonValue>> Params;
@@ -899,6 +1249,14 @@ FString FProceduralOpsModule::SplineScatter(const TSharedPtr<FJsonObject>& Args)
 	Root->SetNumberField(TEXT("applied_params"), AppliedCount);
 	Root->SetArrayField(TEXT("missing"), MissingArr);
 	Root->SetNumberField(TEXT("generated_components"), Triggered);
+	Root->SetStringField(TEXT("distribution_mode"), Distribution.Mode);
+	Root->SetNumberField(TEXT("distribution_points"), DistributionPoints.Num());
+	Root->SetArrayField(TEXT("distribution_point_sample"), BuildPointSampleArray(DistributionPoints));
+	if (!PaletteId.IsEmpty())
+	{
+		Root->SetStringField(TEXT("palette_id"), PaletteId);
+		Root->SetBoolField(TEXT("palette_resolved"), PaletteObj.IsValid());
+	}
 	return ToJson(Root);
 #else
 	return ErrorJson(TEXT("WITH_EDITOR required."));
@@ -1043,6 +1401,17 @@ FString FProceduralOpsModule::BiomeLayers(const TSharedPtr<FJsonObject>& Args)
 		return ErrorJson(FString::Printf(TEXT("Target actor not found: %s"), *TargetId));
 	}
 
+	const FDistributionRequest Distribution = ParseDistributionRequest(Args, TargetActor);
+	const TArray<FVector> DistributionPoints = GenerateDistributionPoints(World, TargetActor, Distribution);
+
+	FString PaletteId;
+	TSharedPtr<FJsonObject> PaletteObj;
+	FString PaletteError;
+	if (!ResolvePaletteIfPresent(Args, PaletteId, PaletteObj, PaletteError))
+	{
+		return ErrorJson(PaletteError);
+	}
+
 	TMap<FString, TSharedPtr<FJsonValue>> Params;
 	if (Args.IsValid())
 	{
@@ -1058,7 +1427,11 @@ FString FProceduralOpsModule::BiomeLayers(const TSharedPtr<FJsonObject>& Args)
 
 	const TSet<FString> Reserved = {
 		TEXT("target_label"), TEXT("pcg_volume_label"), TEXT("actor_label"), TEXT("target_actor"),
-		TEXT("layers"), TEXT("parameters"), TEXT("generate")
+		TEXT("layers"), TEXT("parameters"), TEXT("generate"),
+		TEXT("distribution_mode"), TEXT("density"), TEXT("cluster_radius"), TEXT("min_spacing"),
+		TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("seed"),
+		TEXT("point_count"), TEXT("max_points"),
+		TEXT("palette_id")
 	};
 	TMap<FString, TSharedPtr<FJsonValue>> ExtraParams;
 	GatherParameterObject(Args, ExtraParams, Reserved);
@@ -1109,6 +1482,14 @@ FString FProceduralOpsModule::BiomeLayers(const TSharedPtr<FJsonObject>& Args)
 	Root->SetNumberField(TEXT("applied_params"), AppliedCount);
 	Root->SetArrayField(TEXT("missing"), MissingArr);
 	Root->SetNumberField(TEXT("generated_components"), Triggered);
+	Root->SetStringField(TEXT("distribution_mode"), Distribution.Mode);
+	Root->SetNumberField(TEXT("distribution_points"), DistributionPoints.Num());
+	Root->SetArrayField(TEXT("distribution_point_sample"), BuildPointSampleArray(DistributionPoints));
+	if (!PaletteId.IsEmpty())
+	{
+		Root->SetStringField(TEXT("palette_id"), PaletteId);
+		Root->SetBoolField(TEXT("palette_resolved"), PaletteObj.IsValid());
+	}
 	return ToJson(Root);
 #else
 	return ErrorJson(TEXT("WITH_EDITOR required."));
@@ -1358,6 +1739,34 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 			{
 				CopyObj->SetStringField(TEXT("palette_id"), Args->GetStringField(TEXT("palette_id")));
 			}
+			if (Args->HasField(TEXT("distribution_mode")) && !CopyObj->HasField(TEXT("distribution_mode")))
+			{
+				CopyObj->SetStringField(TEXT("distribution_mode"), Args->GetStringField(TEXT("distribution_mode")));
+			}
+			if (Args->HasField(TEXT("density")) && !CopyObj->HasField(TEXT("density")))
+			{
+				CopyObj->SetNumberField(TEXT("density"), Args->GetNumberField(TEXT("density")));
+			}
+			if (Args->HasField(TEXT("cluster_radius")) && !CopyObj->HasField(TEXT("cluster_radius")))
+			{
+				CopyObj->SetNumberField(TEXT("cluster_radius"), Args->GetNumberField(TEXT("cluster_radius")));
+			}
+			if (Args->HasField(TEXT("min_spacing")) && !CopyObj->HasField(TEXT("min_spacing")))
+			{
+				CopyObj->SetNumberField(TEXT("min_spacing"), Args->GetNumberField(TEXT("min_spacing")));
+			}
+			for (const TCHAR* SharedFieldName : { TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("point_count"), TEXT("max_points") })
+			{
+				const FString SharedField(SharedFieldName);
+				if (!CopyObj->HasField(SharedField))
+				{
+					const TSharedPtr<FJsonValue>* Value = Args->Values.Find(SharedField);
+					if (Value && Value->IsValid())
+					{
+						CopyObj->SetField(SharedField, *Value);
+					}
+				}
+			}
 			return CopyObj;
 		}
 
@@ -1375,6 +1784,34 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 			if (Args->HasField(TEXT("palette_id")) && !CopyObj->HasField(TEXT("palette_id")))
 			{
 				CopyObj->SetStringField(TEXT("palette_id"), Args->GetStringField(TEXT("palette_id")));
+			}
+			if (Args->HasField(TEXT("distribution_mode")) && !CopyObj->HasField(TEXT("distribution_mode")))
+			{
+				CopyObj->SetStringField(TEXT("distribution_mode"), Args->GetStringField(TEXT("distribution_mode")));
+			}
+			if (Args->HasField(TEXT("density")) && !CopyObj->HasField(TEXT("density")))
+			{
+				CopyObj->SetNumberField(TEXT("density"), Args->GetNumberField(TEXT("density")));
+			}
+			if (Args->HasField(TEXT("cluster_radius")) && !CopyObj->HasField(TEXT("cluster_radius")))
+			{
+				CopyObj->SetNumberField(TEXT("cluster_radius"), Args->GetNumberField(TEXT("cluster_radius")));
+			}
+			if (Args->HasField(TEXT("min_spacing")) && !CopyObj->HasField(TEXT("min_spacing")))
+			{
+				CopyObj->SetNumberField(TEXT("min_spacing"), Args->GetNumberField(TEXT("min_spacing")));
+			}
+			for (const TCHAR* SharedFieldName : { TEXT("height_range"), TEXT("slope_range"), TEXT("distance_mask"), TEXT("point_count"), TEXT("max_points") })
+			{
+				const FString SharedField(SharedFieldName);
+				if (!CopyObj->HasField(SharedField))
+				{
+					const TSharedPtr<FJsonValue>* Value = Args->Values.Find(SharedField);
+					if (Value && Value->IsValid())
+					{
+						CopyObj->SetField(SharedField, *Value);
+					}
+				}
 			}
 			return CopyObj;
 		}
@@ -1408,10 +1845,11 @@ FString FProceduralOpsModule::RunOperatorPipeline(const TSharedPtr<FJsonObject>&
 		StageResults.Add(MakeShared<FJsonValueObject>(Parsed));
 	};
 
-	RunStage(TEXT("surface_scatter"), BuildStageArgs(TEXT("surface_scatter"), TEXT("surface")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::SurfaceScatter(StageArgs); });
-	RunStage(TEXT("spline_scatter"), BuildStageArgs(TEXT("spline_scatter"), TEXT("spline")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::SplineScatter(StageArgs); });
+	RunStage(TEXT("terrain_generate"), BuildStageArgs(TEXT("terrain_generate"), TEXT("terrain")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::TerrainGenerate(StageArgs); });
 	RunStage(TEXT("road_layout"), BuildStageArgs(TEXT("road_layout"), TEXT("roads")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::RoadLayout(StageArgs); });
 	RunStage(TEXT("biome_layers"), BuildStageArgs(TEXT("biome_layers"), TEXT("biomes")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::BiomeLayers(StageArgs); });
+	RunStage(TEXT("surface_scatter"), BuildStageArgs(TEXT("surface_scatter"), TEXT("surface")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::SurfaceScatter(StageArgs); });
+	RunStage(TEXT("spline_scatter"), BuildStageArgs(TEXT("spline_scatter"), TEXT("spline")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::SplineScatter(StageArgs); });
 	RunStage(TEXT("stamp_poi"), BuildStageArgs(TEXT("stamp_poi"), TEXT("poi")), [](const TSharedPtr<FJsonObject>& StageArgs) { return FProceduralOpsModule::StampPOI(StageArgs); });
 
 	if (bAnyFailure && bStopOnError)

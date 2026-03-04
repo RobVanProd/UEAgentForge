@@ -10,7 +10,7 @@
 #include "SemanticCommandModule.h"  // v0.3.0 Advanced Semantic Commands
 #include "LevelPresetSystem.h"      // v0.4.0 Named Preset Storage
 #include "LevelPipelineModule.h"    // v0.4.0 Five-Phase AAA Level Pipeline
-#include "ProceduralOpsModule.h"    // v0.5.0 Deterministic Operator Pipeline
+#include "Operators/ProceduralOpsModule.h"    // v0.5.0 Deterministic Operator Pipeline
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -135,6 +135,30 @@ static bool GetCurrentLevelPaths(FString& OutPackagePath, FString& OutWorldPath,
 	OutWorldPath   = OutPackagePath + TEXT(".") + ShortName;
 	OutActorPrefix = OutWorldPath + TEXT(":PersistentLevel.");
 	return true;
+}
+
+static FString QueueEditorScreenshot(const FString& RequestedBaseName)
+{
+	FString BaseName = RequestedBaseName;
+	BaseName.TrimStartAndEndInline();
+	if (BaseName.IsEmpty())
+	{
+		BaseName = TEXT("AgentForge_Screenshot");
+	}
+	BaseName = BaseName.Replace(TEXT(" "), TEXT("_"));
+
+	const FString Dir = TEXT("C:/HGShots");
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	const FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
+	const FString StagedName = FString::Printf(TEXT("%s_%s.png"), *BaseName, *Timestamp);
+	const FString Path = FPaths::Combine(Dir, StagedName);
+
+	if (GEditor)
+	{
+		GEditor->RedrawAllViewports();
+	}
+	FScreenshotRequest::RequestScreenshot(Path, /*bShowUI=*/false, /*bAddFilenameSuffix=*/false);
+	return Path;
 }
 
 static bool ContainsAnyToken(const FString& InLower, const TArray<FString>& Tokens)
@@ -384,11 +408,22 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 
 	const bool bOperatorHeavyCommand =
 		Cmd == TEXT("run_operator_pipeline") ||
+		Cmd == TEXT("op_terrain_generate") ||
 		Cmd == TEXT("op_surface_scatter") ||
 		Cmd == TEXT("op_spline_scatter") ||
 		Cmd == TEXT("op_road_layout") ||
 		Cmd == TEXT("op_biome_layers") ||
 		Cmd == TEXT("op_stamp_poi");
+
+	const bool bDirectPlacementCommand =
+		Cmd == TEXT("spawn_actor") ||
+		Cmd == TEXT("set_actor_transform") ||
+		Cmd == TEXT("delete_actor");
+
+	if (bDirectPlacementCommand && FProceduralOpsModule::IsOperatorOnlyMode())
+	{
+		return ErrorResponse(TEXT("Operator-only mode blocks direct actor placement. Use op_* commands or run_operator_pipeline."));
+	}
 
 	if (Cmd == TEXT("execute_python") || IsMutatingCommand(Cmd) || bOperatorHeavyCommand)
 	{
@@ -504,6 +539,7 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("get_procedural_capabilities"))   { return FProceduralOpsModule::GetProceduralCapabilities(Args); }
 	if (Cmd == TEXT("get_operator_policy"))           { return FProceduralOpsModule::GetOperatorPolicy(); }
 	if (Cmd == TEXT("set_operator_policy"))           { return FProceduralOpsModule::SetOperatorPolicy(Args); }
+	if (Cmd == TEXT("op_terrain_generate"))           { return FProceduralOpsModule::TerrainGenerate(Args); }
 	if (Cmd == TEXT("op_surface_scatter"))            { return FProceduralOpsModule::SurfaceScatter(Args); }
 	if (Cmd == TEXT("op_spline_scatter"))             { return FProceduralOpsModule::SplineScatter(Args); }
 	if (Cmd == TEXT("op_road_layout"))                { return FProceduralOpsModule::RoadLayout(Args); }
@@ -801,6 +837,8 @@ FString UAgentForgeLibrary::Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& A
 	int32 MaxActors = 120;
 	int32 MaxRelationships = 48;
 	bool bIncludeComponents = false;
+	bool bIncludeScreenshot = true;
+	FString ScreenshotLabel = TEXT("world_context");
 	if (Args.IsValid())
 	{
 		if (Args->HasTypedField<EJson::Number>(TEXT("max_actors")))
@@ -814,6 +852,14 @@ FString UAgentForgeLibrary::Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& A
 		if (Args->HasTypedField<EJson::Boolean>(TEXT("include_components")))
 		{
 			bIncludeComponents = Args->GetBoolField(TEXT("include_components"));
+		}
+		if (Args->HasTypedField<EJson::Boolean>(TEXT("include_screenshot")))
+		{
+			bIncludeScreenshot = Args->GetBoolField(TEXT("include_screenshot"));
+		}
+		if (Args->HasTypedField<EJson::String>(TEXT("screenshot_label")))
+		{
+			ScreenshotLabel = Args->GetStringField(TEXT("screenshot_label"));
 		}
 	}
 
@@ -1265,6 +1311,16 @@ FString UAgentForgeLibrary::Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& A
 	SuggestedNextCmds.Add(MakeShared<FJsonValueString>(TEXT("get_actors_in_radius")));
 	SuggestedNextCmds.Add(MakeShared<FJsonValueString>(TEXT("observe_analyze_plan_act")));
 
+	FString ScreenshotPath;
+	if (bIncludeScreenshot)
+	{
+		ScreenshotPath = QueueEditorScreenshot(ScreenshotLabel);
+		if (ScreenshotPath.IsEmpty())
+		{
+			WarningsArr.Add(MakeShared<FJsonValueString>(TEXT("Screenshot request failed for get_world_context.")));
+		}
+	}
+
 	TSharedPtr<FJsonObject> BudgetObj = MakeShared<FJsonObject>();
 	BudgetObj->SetNumberField(TEXT("max_actors"), MaxActors);
 	BudgetObj->SetNumberField(TEXT("selected_actors"), SelectedActors.Num());
@@ -1272,6 +1328,15 @@ FString UAgentForgeLibrary::Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& A
 	BudgetObj->SetBoolField(TEXT("truncated"), AllActors.Num() > SelectedActors.Num());
 	BudgetObj->SetNumberField(TEXT("max_relationships"), MaxRelationships);
 	BudgetObj->SetBoolField(TEXT("include_components"), bIncludeComponents);
+
+	TSharedPtr<FJsonObject> ScreenshotObj = MakeShared<FJsonObject>();
+	ScreenshotObj->SetBoolField(TEXT("requested"), bIncludeScreenshot);
+	ScreenshotObj->SetBoolField(TEXT("queued"), bIncludeScreenshot && !ScreenshotPath.IsEmpty());
+	if (!ScreenshotPath.IsEmpty())
+	{
+		ScreenshotObj->SetStringField(TEXT("path"), ScreenshotPath);
+		BriefArr.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Screenshot queued: %s"), *ScreenshotPath)));
+	}
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetBoolField(TEXT("ok"), true);
@@ -1289,6 +1354,7 @@ FString UAgentForgeLibrary::Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& A
 	Root->SetArrayField(TEXT("llm_brief"), BriefArr);
 	Root->SetArrayField(TEXT("warnings"), WarningsArr);
 	Root->SetArrayField(TEXT("suggested_next_cmds"), SuggestedNextCmds);
+	Root->SetObjectField(TEXT("screenshot"), ScreenshotObj);
 	return ToJsonString(Root);
 #else
 	return ErrorResponse(TEXT("Editor only."));
@@ -1494,17 +1560,7 @@ FString UAgentForgeLibrary::Cmd_TakeScreenshot(const TSharedPtr<FJsonObject>& Ar
 	FString Filename = TEXT("AgentForge_Screenshot");
 	if (Args.IsValid()) { Args->TryGetStringField(TEXT("filename"), Filename); }
 
-	// FScreenshotRequest::RequestScreenshot — correct programmatic editor screenshot API.
-	// Saves on the next rendered frame to the exact path specified (no path-space issues).
-	// bAddFilenameSuffix=false so we control the exact filename; bShowUI=false for silent capture.
-	// Use C:/HGShots staging dir (no spaces in path — HighResShot historically breaks on spaces).
-	const FString Dir = TEXT("C:/HGShots");
-	IFileManager::Get().MakeDirectory(*Dir, true);
-	const FString Timestamp = FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"));
-	const FString StagedName = FString::Printf(TEXT("%s_%s.png"), *Filename, *Timestamp);
-	const FString Path = FPaths::Combine(Dir, StagedName);
-
-	FScreenshotRequest::RequestScreenshot(Path, /*bShowUI=*/false, /*bAddFilenameSuffix=*/false);
+	const FString Path = QueueEditorScreenshot(Filename);
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),   true);

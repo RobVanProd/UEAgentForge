@@ -173,6 +173,8 @@ This is the recommended context hub before planning or mutating actions.
 | `max_actors` | int | no | `120` | Max actors included in the packet (priority-trimmed) |
 | `max_relationships` | int | no | `48` | Max inferred relationships to include |
 | `include_components` | bool | no | `false` | Include component counts per actor |
+| `include_screenshot` | bool | no | `true` | Queue a fresh viewport screenshot and include path in response |
+| `screenshot_label` | string | no | `world_context` | Prefix used for the queued screenshot filename |
 
 **Response (shape):**
 ```json
@@ -195,9 +197,11 @@ This is the recommended context hub before planning or mutating actions.
   "gameplay_anchors": [{ "label": "HE_Key_A", "category": "objective", "location": {"x":0,"y":0,"z":0} }],
   "relationships": [{ "from":"HE_Key_A", "to":"HE_Door_A", "type":"matching_suffix", "confidence":0.95 }],
   "spatial_hotspots": [{ "cell": 6, "actor_count": 89, "dominant_category": "environment", "center": {"x":0,"y":0,"z":0} }],
+  "screenshot": { "requested": true, "queued": true, "path": "C:/HGShots/world_context_20260303_190233.png" },
   "llm_brief": [
     "Map: /Game/HorrorEngine/Maps/HE_OpenWorld_AAA_Step1",
-    "Actors: 403 total, 120 included in context packet"
+    "Actors: 403 total, 120 included in context packet",
+    "Screenshot queued: C:/HGShots/world_context_20260303_190233.png"
   ],
   "warnings": ["Context truncated: 283 actors omitted by max_actors budget."],
   "suggested_next_cmds": ["get_deep_properties", "get_actors_in_radius", "observe_analyze_plan_act"]
@@ -1081,6 +1085,7 @@ Update runtime constraints for operator-mode generation.
 
 ### `op_surface_scatter`
 Apply scatter parameters to a target PCG actor/component and optionally trigger generation.
+This operator now routes placement intent through `DistributionEngine` before generation.
 
 **Args:**
 
@@ -1088,6 +1093,15 @@ Apply scatter parameters to a target PCG actor/component and optionally trigger 
 |---|---|---|---|
 | `target_label` or `pcg_volume_label` | string | yes | Target actor label/name/path |
 | `parameters` | object | no | Property map applied to actor/components |
+| `distribution_mode` | string | no | `blue_noise`, `poisson`, or `cluster` |
+| `density` | float | no | Sampling density used to estimate candidate count |
+| `cluster_radius` | float | no | Cluster spread (cluster mode) |
+| `min_spacing` | float | no | Minimum spacing radius for blue-noise/poisson |
+| `height_range` | array<[min,max]> | no | Height filter |
+| `slope_range` | array<[min,max]> | no | Slope filter in degrees |
+| `distance_mask` | object | no | `{origin:{x,y,z}, min, max}` distance mask |
+| `seed` | int | no | Deterministic sampling seed |
+| `palette_id` | string | no | Curated palette identifier resolved by `PaletteManager` |
 | `generate` | bool | no | Trigger PCG component generation (default true) |
 
 ---
@@ -1103,6 +1117,15 @@ Update spline control points and scatter parameters on a spline-based procedural
 | `control_points` | array<{x,y,z}> | no | World-space spline points |
 | `closed_loop` | bool | no | Whether spline is closed |
 | `parameters` | object | no | Property map applied to actor/components |
+| `distribution_mode` | string | no | `blue_noise`, `poisson`, or `cluster` |
+| `density` | float | no | Sampling density used when control points are omitted |
+| `cluster_radius` | float | no | Cluster spread (cluster mode) |
+| `min_spacing` | float | no | Minimum spacing radius |
+| `height_range` | array<[min,max]> | no | Height filter |
+| `slope_range` | array<[min,max]> | no | Slope filter in degrees |
+| `distance_mask` | object | no | `{origin:{x,y,z}, min, max}` distance mask |
+| `seed` | int | no | Deterministic sampling seed |
+| `palette_id` | string | no | Curated palette identifier |
 | `generate` | bool | no | Trigger PCG generation |
 
 ---
@@ -1132,7 +1155,35 @@ Apply layered biome controls (groundcover/shrub/tree/rock density, path width, s
 | `target_label` | string | yes | Biome/PCG actor target |
 | `layers` | object | no | Layer parameter map |
 | `parameters` | object | no | Additional property map |
+| `distribution_mode` | string | no | `blue_noise`, `poisson`, or `cluster` |
+| `density` | float | no | Sampling density for distribution planning |
+| `cluster_radius` | float | no | Cluster spread (cluster mode) |
+| `min_spacing` | float | no | Minimum spacing radius |
+| `height_range` | array<[min,max]> | no | Height filter |
+| `slope_range` | array<[min,max]> | no | Slope filter in degrees |
+| `distance_mask` | object | no | `{origin:{x,y,z}, min, max}` distance mask |
+| `seed` | int | no | Deterministic sampling seed |
+| `palette_id` | string | no | Curated palette identifier |
 | `generate` | bool | no | Trigger procedural generation |
+
+---
+
+### `op_terrain_generate`
+Generate deterministic terrain data (heightmap + ridged-noise + erosion baseline).
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `seed` | int | no | Deterministic terrain seed |
+| `width` | int | no | Heightmap width |
+| `height` | int | no | Heightmap height |
+| `frequency` | float | no | Base noise frequency |
+| `amplitude` | float | no | Base noise amplitude |
+| `ridge_strength` | float | no | Ridged-noise blend strength |
+| `erosion_iterations` | int | no | Thermal erosion iterations |
+| `erosion_strength` | float | no | Thermal erosion blend strength |
+| `spawn_landscape` | bool | no | Attempt direct landscape spawn (stub-safe) |
 
 ---
 
@@ -1155,7 +1206,7 @@ Deterministically stamp hero POI actors onto anchor points.
 
 ### `run_operator_pipeline`
 Execute the constrained stack in order:
-`surface_scatter -> spline_scatter -> road_layout -> biome_layers -> stamp_poi`.
+`terrain_generate -> road_layout -> biome_layers -> surface_scatter -> spline_scatter -> stamp_poi`.
 
 Each stage is optional and provided via nested args objects.
 
@@ -1163,6 +1214,7 @@ Each stage is optional and provided via nested args objects.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `terrain_generate` or `terrain` | object | no | Args for `op_terrain_generate` |
 | `surface_scatter` or `surface` | object | no | Args for `op_surface_scatter` |
 | `spline_scatter` or `spline` | object | no | Args for `op_spline_scatter` |
 | `road_layout` or `roads` | object | no | Args for `op_road_layout` |
@@ -1170,6 +1222,13 @@ Each stage is optional and provided via nested args objects.
 | `stamp_poi` or `poi` | object | no | Args for `op_stamp_poi` |
 | `seed` | int | no | Shared seed injected into stage args if missing |
 | `palette_id` | string | no | Shared palette injected into stage args if missing |
+| `distribution_mode` | string | no | Shared distribution mode injected when missing |
+| `density` | float | no | Shared density injected when missing |
+| `cluster_radius` | float | no | Shared cluster radius injected when missing |
+| `min_spacing` | float | no | Shared minimum spacing injected when missing |
+| `height_range` | array | no | Shared height filter injected when missing |
+| `slope_range` | array | no | Shared slope filter injected when missing |
+| `distance_mask` | object | no | Shared distance mask injected when missing |
 | `stop_on_error` | bool | no | Cancel transaction on first stage failure |
 | `max_actor_delta` | int | no | Rollback if exceeded |
 | `max_memory_used_mb` | float | no | Rollback if exceeded |
@@ -1178,4 +1237,7 @@ Each stage is optional and provided via nested args objects.
 - `stages[]` per-stage structured results
 - `rolled_back` when budgets or stage-failure policy triggered
 - actor/memory before/after metrics
+
+**Policy note:**
+- When `operator_only` is enabled (default), direct atomic placement commands (`spawn_actor`, `set_actor_transform`, `delete_actor`) are rejected.
 

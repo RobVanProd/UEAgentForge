@@ -1,0 +1,24 @@
+{
+  "palette_id": "forest_temperate",
+  "trees": [
+    "/Game/Megascans/Trees/Pine_01",
+    "/Game/Megascans/Trees/Oak_01"
+  ],
+  "rocks": [
+    "/Game/Megascans/Rocks/Rock_A",
+    "/Game/Megascans/Rocks/Rock_B"
+  ],
+  "shrubs": [
+    "/Game/Megascans/Plants/Bush_01"
+  ],
+  "scale_range": {
+    "trees": [
+      0.8,
+      1.2
+    ],
+    "rocks": [
+      0.6,
+      1.4
+    ]
+  }
+}

@@ -22,6 +22,7 @@ commit	workstream	verification	status	description
    - Python is available for `py_compile` and MCP/client checks
    - Unreal build tooling is available if compilation is expected
    - Remote Control API smoke tests are only possible if the editor is running
+   - Prefer `agent/tools/launch_runtime_host.ps1` for unattended RuntimeHost launches because it clears stale restore prompts before waiting on Remote Control
 6. Start work. Do not wait for the human once the loop has begun.
 
 ## Mission
@@ -75,7 +76,7 @@ LOOP UNTIL MANUALLY STOPPED:
 3. Choose the smallest critical-path slice that creates forward progress. Start with Addendum A priority-1 commands before MCP, then continue to the main v0.5.0 phases.
 4. Implement the slice directly in the repo.
 5. Run the narrowest useful validation for the edited files. Redirect long output to `agent/run.log` or `agent/logs/<timestamp>-<topic>.log`.
-6. When the slice touches editor behavior, commands, screenshots, or viewport workflows, compile and launch Unreal if that is the shortest credible proof.
+6. When the slice touches editor behavior, commands, screenshots, or viewport workflows, compile and launch Unreal if that is the shortest credible proof. Prefer `agent/tools/launch_runtime_host.ps1` for the scratch host.
 7. If the slice is good, commit it and append one line to `agent/results.tsv`.
 8. If the slice fails, either fix it immediately or revert to the last good commit and log the attempt as `discard` or `blocked`.
 9. If human judgment is required, write a short entry in `agent/review_inbox.md` and continue with other unblocked work.

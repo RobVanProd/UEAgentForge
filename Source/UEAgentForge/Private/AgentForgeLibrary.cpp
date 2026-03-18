@@ -11,6 +11,7 @@
 #include "LevelPresetSystem.h"      // v0.4.0 Named Preset Storage
 #include "LevelPipelineModule.h"    // v0.4.0 Five-Phase AAA Level Pipeline
 #include "Operators/ProceduralOpsModule.h"    // v0.5.0 Deterministic Operator Pipeline
+#include "LLM/AgentForgeLLMSubsystem.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -34,13 +35,18 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/SpotLight.h"
+#include "Engine/RectLight.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/MeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/LightComponent.h"
 #include "Components/PointLightComponent.h"
 #include "Components/SpotLightComponent.h"
+#include "Components/RectLightComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/PointLight.h"
 #include "Engine/SkyLight.h"
+#include "Engine/Texture2D.h"
 // Blueprint manipulation
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BlueprintEditorLibrary.h"
@@ -60,6 +66,9 @@
 #include "Materials/MaterialInstanceConstant.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
+#include "Sound/SoundBase.h"
+#include "Sound/SoundCue.h"
+#include "Sound/SoundWave.h"
 // Phase 1: content management
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
@@ -90,6 +99,7 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
 #include "Components/SpotLightComponent.h"
+#include "UObject/UnrealType.h"
 #endif
 
 // ============================================================================
@@ -341,6 +351,721 @@ static UMaterialInstanceDynamic* GetOrCreateDynamicMaterialInstance(
 	return MID;
 }
 
+static UStaticMesh* GetBasicCubeMesh()
+{
+	return LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+}
+
+static bool LoadOptionalMaterial(const FString& MaterialPath, UMaterialInterface*& OutMaterial, FString& OutError)
+{
+	OutMaterial = nullptr;
+	OutError.Reset();
+
+	if (MaterialPath.IsEmpty())
+	{
+		return true;
+	}
+
+	OutMaterial = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
+	if (!OutMaterial)
+	{
+		OutError = FString::Printf(TEXT("Material not found: %s"), *MaterialPath);
+		return false;
+	}
+
+	return true;
+}
+
+static TSharedPtr<FJsonObject> MakeVectorJson(const FVector& V)
+{
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetNumberField(TEXT("x"), V.X);
+	Obj->SetNumberField(TEXT("y"), V.Y);
+	Obj->SetNumberField(TEXT("z"), V.Z);
+	return Obj;
+}
+
+static void AddActorSummary(TArray<TSharedPtr<FJsonValue>>& OutArray, AActor* Actor)
+{
+	if (!Actor)
+	{
+		return;
+	}
+
+	TSharedPtr<FJsonObject> ActorObj = MakeShared<FJsonObject>();
+	ActorObj->SetStringField(TEXT("label"), Actor->GetActorLabel());
+	ActorObj->SetStringField(TEXT("name"), Actor->GetName());
+	ActorObj->SetStringField(TEXT("object_path"), Actor->GetPathName());
+	ActorObj->SetObjectField(TEXT("location"), MakeVectorJson(Actor->GetActorLocation()));
+	OutArray.Add(MakeShared<FJsonValueObject>(ActorObj));
+}
+
+static AActor* SpawnGroupActor(UWorld* World, const FString& Label, const FVector& Location, FString& OutError)
+{
+	if (!World)
+	{
+		OutError = TEXT("No editor world.");
+		return nullptr;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* GroupActor = World->SpawnActor<AActor>(AActor::StaticClass(), Location, FRotator::ZeroRotator, Params);
+	if (!GroupActor)
+	{
+		OutError = TEXT("Failed to spawn group actor.");
+		return nullptr;
+	}
+
+	GroupActor->Modify();
+	if (!Label.IsEmpty())
+	{
+		GroupActor->SetActorLabel(Label);
+	}
+
+	if (!GroupActor->GetRootComponent())
+	{
+		USceneComponent* Root = NewObject<USceneComponent>(GroupActor, TEXT("AgentForgeRoot"));
+		if (!Root)
+		{
+			OutError = TEXT("Failed to create group root component.");
+			return nullptr;
+		}
+
+		Root->Modify();
+		Root->SetMobility(EComponentMobility::Static);
+		GroupActor->SetRootComponent(Root);
+		GroupActor->AddInstanceComponent(Root);
+		Root->RegisterComponent();
+	}
+
+	GroupActor->SetActorLocation(Location);
+	return GroupActor;
+}
+
+static AStaticMeshActor* SpawnBoxActor(
+	UWorld* World,
+	const FVector& Center,
+	const FVector& DimensionsCm,
+	const FRotator& Rotation,
+	const FString& Label,
+	const FString& MaterialPath,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (!World)
+	{
+		OutError = TEXT("No editor world.");
+		return nullptr;
+	}
+
+	if (DimensionsCm.X <= KINDA_SMALL_NUMBER || DimensionsCm.Y <= KINDA_SMALL_NUMBER || DimensionsCm.Z <= KINDA_SMALL_NUMBER)
+	{
+		OutError = TEXT("Box dimensions must be greater than zero.");
+		return nullptr;
+	}
+
+	UStaticMesh* CubeMesh = GetBasicCubeMesh();
+	if (!CubeMesh)
+	{
+		OutError = TEXT("Failed to load /Engine/BasicShapes/Cube.Cube.");
+		return nullptr;
+	}
+
+	UMaterialInterface* Material = nullptr;
+	if (!LoadOptionalMaterial(MaterialPath, Material, OutError))
+	{
+		return nullptr;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Center, Rotation, Params);
+	if (!Actor)
+	{
+		OutError = TEXT("Failed to spawn static mesh actor.");
+		return nullptr;
+	}
+
+	Actor->Modify();
+	if (!Label.IsEmpty())
+	{
+		Actor->SetActorLabel(Label);
+	}
+
+	UStaticMeshComponent* MeshComp = Actor->GetStaticMeshComponent();
+	if (!MeshComp)
+	{
+		OutError = TEXT("Spawned static mesh actor has no static mesh component.");
+		return nullptr;
+	}
+
+	MeshComp->Modify();
+	MeshComp->SetMobility(EComponentMobility::Static);
+	MeshComp->SetStaticMesh(CubeMesh);
+	Actor->SetActorScale3D(FVector(
+		DimensionsCm.X / 100.0f,
+		DimensionsCm.Y / 100.0f,
+		DimensionsCm.Z / 100.0f));
+
+	if (Material)
+	{
+		MeshComp->SetMaterial(0, Material);
+	}
+
+	return Actor;
+}
+
+static bool AttachActorToParent(AActor* Child, AActor* Parent)
+{
+	if (!Child || !Parent)
+	{
+		return false;
+	}
+
+	Child->Modify();
+	return Child->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
+}
+
+static FString SpawnLinearWallSegments(
+	UWorld* World,
+	const FVector& Start,
+	const FVector& End,
+	float BaseZ,
+	float Height,
+	float Thickness,
+	const FString& MaterialPath,
+	const FString& Label,
+	bool bHasWindows,
+	float WindowSpacing,
+	float WindowHeight,
+	AActor* ParentActor,
+	TArray<AActor*>& OutSegments)
+{
+	const FVector Delta = End - Start;
+	const float Length = Delta.Size();
+	if (Length <= KINDA_SMALL_NUMBER)
+	{
+		return TEXT("Wall start/end points are identical.");
+	}
+
+	if (Height <= KINDA_SMALL_NUMBER || Thickness <= KINDA_SMALL_NUMBER)
+	{
+		return TEXT("Wall height and thickness must be greater than zero.");
+	}
+
+	const float YawDeg = FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X));
+	const FRotator Rotation(0.0f, YawDeg, 0.0f);
+	const FVector Direction = Delta / Length;
+
+	auto SpawnSegment = [&](const FString& SegmentLabel, float StartAlong, float SegmentLength, float SegmentBottomZ, float SegmentHeight) -> bool
+	{
+		if (SegmentLength <= KINDA_SMALL_NUMBER || SegmentHeight <= KINDA_SMALL_NUMBER)
+		{
+			return true;
+		}
+
+		const FVector SegmentCenter =
+			Start +
+			Direction * (StartAlong + (SegmentLength * 0.5f)) +
+			FVector(0.0f, 0.0f, SegmentBottomZ + (SegmentHeight * 0.5f));
+
+		FString SpawnError;
+		AStaticMeshActor* SegmentActor = SpawnBoxActor(
+			World,
+			SegmentCenter,
+			FVector(SegmentLength, Thickness, SegmentHeight),
+			Rotation,
+			SegmentLabel,
+			MaterialPath,
+			SpawnError);
+		if (!SegmentActor)
+		{
+			return false;
+		}
+
+		if (ParentActor)
+		{
+			AttachActorToParent(SegmentActor, ParentActor);
+		}
+		OutSegments.Add(SegmentActor);
+		return true;
+	};
+
+	if (!bHasWindows || Length < 220.0f)
+	{
+		if (!SpawnSegment(Label, 0.0f, Length, BaseZ, Height))
+		{
+			return TEXT("Failed to spawn wall segment.");
+		}
+		return FString();
+	}
+
+	const float SillHeight = FMath::Clamp(WindowHeight * 0.45f, 70.0f, FMath::Max(70.0f, Height - 120.0f));
+	const float WindowOpeningHeight = FMath::Clamp(WindowHeight, 80.0f, FMath::Max(80.0f, Height - SillHeight - 40.0f));
+	const float HeaderHeight = FMath::Max(40.0f, Height - SillHeight - WindowOpeningHeight);
+	const float WindowWidth = FMath::Clamp(WindowSpacing * 0.5f, 90.0f, 180.0f);
+	const float RepeatSpacing = FMath::Max(WindowSpacing, WindowWidth + 80.0f);
+
+	TArray<float> WindowCenters;
+	for (float Along = RepeatSpacing * 0.5f; Along < Length - (RepeatSpacing * 0.5f); Along += RepeatSpacing)
+	{
+		WindowCenters.Add(Along);
+	}
+	if (WindowCenters.Num() == 0)
+	{
+		WindowCenters.Add(Length * 0.5f);
+	}
+
+	float Cursor = 0.0f;
+	int32 SegmentIndex = 0;
+	for (const float WindowCenter : WindowCenters)
+	{
+		const float WindowStart = FMath::Max(0.0f, WindowCenter - (WindowWidth * 0.5f));
+		const float WindowEnd = FMath::Min(Length, WindowCenter + (WindowWidth * 0.5f));
+		const float LeftLength = WindowStart - Cursor;
+		if (LeftLength > KINDA_SMALL_NUMBER)
+		{
+			if (!SpawnSegment(FString::Printf(TEXT("%s_Solid_%02d"), *Label, ++SegmentIndex), Cursor, LeftLength, BaseZ, Height))
+			{
+				return TEXT("Failed to spawn solid wall segment.");
+			}
+		}
+
+		if (!SpawnSegment(FString::Printf(TEXT("%s_Lower_%02d"), *Label, ++SegmentIndex), WindowStart, WindowEnd - WindowStart, BaseZ, SillHeight))
+		{
+			return TEXT("Failed to spawn lower window wall segment.");
+		}
+		if (HeaderHeight > KINDA_SMALL_NUMBER)
+		{
+			if (!SpawnSegment(
+				FString::Printf(TEXT("%s_Header_%02d"), *Label, ++SegmentIndex),
+				WindowStart,
+				WindowEnd - WindowStart,
+				BaseZ + SillHeight + WindowOpeningHeight,
+				HeaderHeight))
+			{
+				return TEXT("Failed to spawn header wall segment.");
+			}
+		}
+
+		Cursor = WindowEnd;
+	}
+
+	const float TailLength = Length - Cursor;
+	if (TailLength > KINDA_SMALL_NUMBER)
+	{
+		if (!SpawnSegment(FString::Printf(TEXT("%s_Solid_%02d"), *Label, ++SegmentIndex), Cursor, TailLength, BaseZ, Height))
+		{
+			return TEXT("Failed to spawn tail wall segment.");
+		}
+	}
+
+	return FString();
+}
+
+static UStaticMesh* GetBasicCylinderMesh()
+{
+	return LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+}
+
+static AStaticMeshActor* SpawnStaticMeshPrimitiveActor(
+	UWorld* World,
+	UStaticMesh* Mesh,
+	const FVector& Center,
+	const FVector& Scale3D,
+	const FRotator& Rotation,
+	const FString& Label,
+	const FString& MaterialPath,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (!World)
+	{
+		OutError = TEXT("No editor world.");
+		return nullptr;
+	}
+	if (!Mesh)
+	{
+		OutError = TEXT("Static mesh is null.");
+		return nullptr;
+	}
+
+	UMaterialInterface* Material = nullptr;
+	if (!LoadOptionalMaterial(MaterialPath, Material, OutError))
+	{
+		return nullptr;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Center, Rotation, Params);
+	if (!Actor)
+	{
+		OutError = TEXT("Failed to spawn static mesh actor.");
+		return nullptr;
+	}
+
+	Actor->Modify();
+	if (!Label.IsEmpty())
+	{
+		Actor->SetActorLabel(Label);
+	}
+
+	UStaticMeshComponent* MeshComp = Actor->GetStaticMeshComponent();
+	if (!MeshComp)
+	{
+		OutError = TEXT("Spawned static mesh actor has no static mesh component.");
+		return nullptr;
+	}
+
+	MeshComp->Modify();
+	MeshComp->SetMobility(EComponentMobility::Static);
+	MeshComp->SetStaticMesh(Mesh);
+	Actor->SetActorScale3D(Scale3D);
+	if (Material)
+	{
+		MeshComp->SetMaterial(0, Material);
+	}
+	return Actor;
+}
+
+static UActorComponent* FindActorComponentByNameOrClass(AActor* Actor, const FString& Segment)
+{
+	if (!Actor || Segment.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	FString Needle = Segment;
+	Needle.TrimStartAndEndInline();
+
+	TInlineComponentArray<UActorComponent*> Components(Actor);
+	for (UActorComponent* Component : Components)
+	{
+		if (!Component)
+		{
+			continue;
+		}
+
+		const FString ComponentName = Component->GetName();
+		const FString ComponentLabel = Component->GetFName().ToString();
+		const FString ClassName = Component->GetClass()->GetName();
+		FString ClassNameWithoutPrefix = ClassName;
+		if (ClassNameWithoutPrefix.StartsWith(TEXT("U")))
+		{
+			ClassNameWithoutPrefix.RightChopInline(1, EAllowShrinking::No);
+		}
+
+		if (ComponentName.Equals(Needle, ESearchCase::IgnoreCase) ||
+			ComponentLabel.Equals(Needle, ESearchCase::IgnoreCase) ||
+			ClassName.Equals(Needle, ESearchCase::IgnoreCase) ||
+			ClassNameWithoutPrefix.Equals(Needle, ESearchCase::IgnoreCase))
+		{
+			return Component;
+		}
+	}
+
+	return nullptr;
+}
+
+static UObject* ResolvePropertyContainer(UObject* RootObject, const FString& PropertyPath, FString& OutLeafName, FString& OutError)
+{
+	OutLeafName.Reset();
+	OutError.Reset();
+
+	if (!RootObject)
+	{
+		OutError = TEXT("Root object is null.");
+		return nullptr;
+	}
+
+	TArray<FString> Segments;
+	PropertyPath.ParseIntoArray(Segments, TEXT("."), true);
+	if (Segments.Num() == 0)
+	{
+		OutError = TEXT("Property path is empty.");
+		return nullptr;
+	}
+
+	UObject* CurrentObject = RootObject;
+	for (int32 Index = 0; Index < Segments.Num() - 1; ++Index)
+	{
+		const FString Segment = Segments[Index];
+
+		if (AActor* Actor = Cast<AActor>(CurrentObject))
+		{
+			if (UActorComponent* Component = FindActorComponentByNameOrClass(Actor, Segment))
+			{
+				CurrentObject = Component;
+				continue;
+			}
+		}
+
+		FProperty* Property = CurrentObject->GetClass()->FindPropertyByName(*Segment);
+		FObjectPropertyBase* ObjectProperty = Property ? CastField<FObjectPropertyBase>(Property) : nullptr;
+		if (!ObjectProperty)
+		{
+			OutError = FString::Printf(TEXT("Intermediate property is not an object reference: %s"), *Segment);
+			return nullptr;
+		}
+
+		UObject* NextObject = ObjectProperty->GetObjectPropertyValue_InContainer(CurrentObject);
+		if (!NextObject)
+		{
+			OutError = FString::Printf(TEXT("Intermediate object is null: %s"), *Segment);
+			return nullptr;
+		}
+
+		CurrentObject = NextObject;
+	}
+
+	OutLeafName = Segments.Last();
+	return CurrentObject;
+}
+
+static FProperty* FindResolvedProperty(UObject* ContainerObject, const FString& LeafName, FString& OutError)
+{
+	OutError.Reset();
+	if (!ContainerObject)
+	{
+		OutError = TEXT("Property container is null.");
+		return nullptr;
+	}
+
+	FProperty* Property = ContainerObject->GetClass()->FindPropertyByName(*LeafName);
+	if (!Property)
+	{
+		OutError = FString::Printf(TEXT("Property not found: %s"), *LeafName);
+		return nullptr;
+	}
+	return Property;
+}
+
+static bool ExportResolvedPropertyValue(UObject* ContainerObject, const FString& LeafName, FString& OutValue, FString& OutError)
+{
+	FProperty* Property = FindResolvedProperty(ContainerObject, LeafName, OutError);
+	if (!Property)
+	{
+		return false;
+	}
+
+	void* ValuePtr = Property->ContainerPtrToValuePtr<void>(ContainerObject);
+	if (!ValuePtr)
+	{
+		OutError = FString::Printf(TEXT("Could not resolve property value pointer for %s"), *LeafName);
+		return false;
+	}
+
+	OutValue.Reset();
+	Property->ExportTextItem_Direct(OutValue, ValuePtr, nullptr, ContainerObject, PPF_None);
+	return true;
+}
+
+static bool ImportResolvedPropertyValue(UObject* ContainerObject, const FString& LeafName, const FString& InValue, FString& OutError)
+{
+	FProperty* Property = FindResolvedProperty(ContainerObject, LeafName, OutError);
+	if (!Property)
+	{
+		return false;
+	}
+
+	void* ValuePtr = Property->ContainerPtrToValuePtr<void>(ContainerObject);
+	if (!ValuePtr)
+	{
+		OutError = FString::Printf(TEXT("Could not resolve property value pointer for %s"), *LeafName);
+		return false;
+	}
+
+	if (AActor* Actor = Cast<AActor>(ContainerObject))
+	{
+		Actor->Modify();
+	}
+	else if (UActorComponent* Component = Cast<UActorComponent>(ContainerObject))
+	{
+		Component->Modify();
+	}
+
+	const TCHAR* ImportResult = Property->ImportText_Direct(*InValue, ValuePtr, ContainerObject, PPF_None);
+	if (!ImportResult)
+	{
+		OutError = FString::Printf(TEXT("Failed to import value '%s' into property %s"), *InValue, *LeafName);
+		return false;
+	}
+
+	return true;
+}
+
+static bool ParseMobilityValue(const FString& MobilityString, EComponentMobility::Type& OutMobility)
+{
+	FString Value = MobilityString;
+	Value.TrimStartAndEndInline();
+	Value.ToLowerInline();
+
+	if (Value == TEXT("static"))
+	{
+		OutMobility = EComponentMobility::Static;
+		return true;
+	}
+	if (Value == TEXT("stationary"))
+	{
+		OutMobility = EComponentMobility::Stationary;
+		return true;
+	}
+	if (Value == TEXT("movable"))
+	{
+		OutMobility = EComponentMobility::Movable;
+		return true;
+	}
+
+	return false;
+}
+
+static FLevelEditorViewportClient* GetPrimaryPerspectiveViewportClient()
+{
+	if (!GEditor)
+	{
+		return nullptr;
+	}
+
+	for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
+	{
+		if (ViewportClient && ViewportClient->IsPerspective())
+		{
+			return ViewportClient;
+		}
+	}
+
+	return nullptr;
+}
+
+static bool ParseLLMProviderName(const FString& InProvider, EAgentForgeLLMProvider& OutProvider)
+{
+	FString Provider = InProvider;
+	Provider.ReplaceInline(TEXT("-"), TEXT(""));
+	Provider.ReplaceInline(TEXT("_"), TEXT(""));
+	Provider.ToLowerInline();
+
+	if (Provider == TEXT("anthropic") || Provider == TEXT("claude"))
+	{
+		OutProvider = EAgentForgeLLMProvider::Anthropic;
+		return true;
+	}
+	if (Provider == TEXT("openai"))
+	{
+		OutProvider = EAgentForgeLLMProvider::OpenAI;
+		return true;
+	}
+	if (Provider == TEXT("deepseek"))
+	{
+		OutProvider = EAgentForgeLLMProvider::DeepSeek;
+		return true;
+	}
+	if (Provider == TEXT("openaicompatible") || Provider == TEXT("compatible") || Provider == TEXT("ollama"))
+	{
+		OutProvider = EAgentForgeLLMProvider::OpenAICompatible;
+		return true;
+	}
+	return false;
+}
+
+static FString GetLLMProviderName(EAgentForgeLLMProvider Provider)
+{
+	switch (Provider)
+	{
+	case EAgentForgeLLMProvider::Anthropic: return TEXT("Anthropic");
+	case EAgentForgeLLMProvider::OpenAI: return TEXT("OpenAI");
+	case EAgentForgeLLMProvider::DeepSeek: return TEXT("DeepSeek");
+	case EAgentForgeLLMProvider::OpenAICompatible: return TEXT("OpenAICompatible");
+	default: return TEXT("Unknown");
+	}
+}
+
+static bool ParseChatMessages(
+	const TSharedPtr<FJsonObject>& Args,
+	TArray<FAgentForgeChatMessage>& OutMessages,
+	FString& OutError)
+{
+	OutMessages.Reset();
+	OutError.Reset();
+
+	const TArray<TSharedPtr<FJsonValue>>* MessageValues = nullptr;
+	if (Args->TryGetArrayField(TEXT("messages"), MessageValues) && MessageValues)
+	{
+		for (const TSharedPtr<FJsonValue>& MessageValue : *MessageValues)
+		{
+			const TSharedPtr<FJsonObject>* MessageObj = nullptr;
+			if (!MessageValue.IsValid() || !MessageValue->TryGetObject(MessageObj) || !MessageObj || !(*MessageObj).IsValid())
+			{
+				OutError = TEXT("llm_chat messages must be objects.");
+				return false;
+			}
+
+			FAgentForgeChatMessage Message;
+			(*MessageObj)->TryGetStringField(TEXT("role"), Message.Role);
+			(*MessageObj)->TryGetStringField(TEXT("content"), Message.Content);
+
+			const TArray<TSharedPtr<FJsonValue>>* ImageDataValues = nullptr;
+			if ((*MessageObj)->TryGetArrayField(TEXT("image_data"), ImageDataValues) && ImageDataValues)
+			{
+				for (const TSharedPtr<FJsonValue>& ImageValue : *ImageDataValues)
+				{
+					Message.ImageData.Add(ImageValue.IsValid() ? ImageValue->AsString() : FString());
+				}
+			}
+
+			const TArray<TSharedPtr<FJsonValue>>* ImageMediaValues = nullptr;
+			if ((*MessageObj)->TryGetArrayField(TEXT("image_media_types"), ImageMediaValues) && ImageMediaValues)
+			{
+				for (const TSharedPtr<FJsonValue>& MediaValue : *ImageMediaValues)
+				{
+					Message.ImageMediaTypes.Add(MediaValue.IsValid() ? MediaValue->AsString() : FString());
+				}
+			}
+
+			if (Message.Role.IsEmpty())
+			{
+				Message.Role = TEXT("user");
+			}
+			OutMessages.Add(MoveTemp(Message));
+		}
+	}
+
+	if (OutMessages.Num() == 0 && Args->HasTypedField<EJson::String>(TEXT("prompt")))
+	{
+		FAgentForgeChatMessage PromptMessage;
+		PromptMessage.Role = TEXT("user");
+		PromptMessage.Content = Args->GetStringField(TEXT("prompt"));
+		OutMessages.Add(MoveTemp(PromptMessage));
+	}
+
+	if (OutMessages.Num() == 0)
+	{
+		OutError = TEXT("llm_chat requires a non-empty messages array.");
+		return false;
+	}
+
+	return true;
+}
+
+static TSharedPtr<FJsonObject> BuildLLMResponseObject(
+	const FAgentForgeLLMResponse& Response,
+	EAgentForgeLLMProvider Provider,
+	const FString& Model)
+{
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), Response.bSuccess);
+	Obj->SetStringField(TEXT("provider"), GetLLMProviderName(Provider));
+	Obj->SetStringField(TEXT("model"), Model);
+	Obj->SetStringField(TEXT("content"), Response.Content);
+	Obj->SetStringField(TEXT("error_message"), Response.ErrorMessage);
+	Obj->SetStringField(TEXT("raw_json"), Response.RawJSON);
+	Obj->SetStringField(TEXT("reasoning_content"), Response.ReasoningContent);
+	Obj->SetNumberField(TEXT("prompt_tokens"), Response.PromptTokens);
+	Obj->SetNumberField(TEXT("completion_tokens"), Response.CompletionTokens);
+	return Obj;
+}
+
 #endif // WITH_EDITOR
 
 // ============================================================================
@@ -410,8 +1135,14 @@ bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
 	static const TArray<FString> MutatingCmds =
 	{
 		TEXT("spawn_actor"), TEXT("set_actor_transform"), TEXT("delete_actor"),
+		TEXT("duplicate_actor"),
 		TEXT("spawn_point_light"), TEXT("spawn_spot_light"),
+		TEXT("spawn_rect_light"), TEXT("spawn_directional_light"),
 		TEXT("set_static_mesh"), TEXT("set_actor_scale"),
+		TEXT("set_actor_label"), TEXT("set_actor_mobility"), TEXT("set_actor_visibility"),
+		TEXT("group_actors"), TEXT("set_actor_property"),
+		TEXT("create_wall"), TEXT("create_floor"), TEXT("create_room"),
+		TEXT("create_corridor"), TEXT("create_pillar"),
 		TEXT("create_blueprint"), TEXT("compile_blueprint"), TEXT("set_bp_cdo_property"),
 		TEXT("edit_blueprint_node"), TEXT("create_material_instance"), TEXT("set_material_params"),
 		TEXT("apply_material_to_actor"), TEXT("set_mesh_material_color"),
@@ -551,6 +1282,13 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("get_world_context"))     { return Cmd_GetWorldContext(Args); }
 	if (Cmd == TEXT("get_available_meshes"))  { return Cmd_GetAvailableMeshes(Args); }
 	if (Cmd == TEXT("get_available_materials")) { return Cmd_GetAvailableMaterials(Args); }
+	if (Cmd == TEXT("get_available_blueprints")) { return Cmd_GetAvailableBlueprints(Args); }
+	if (Cmd == TEXT("get_available_textures")) { return Cmd_GetAvailableTextures(Args); }
+	if (Cmd == TEXT("get_available_sounds")) { return Cmd_GetAvailableSounds(Args); }
+	if (Cmd == TEXT("get_asset_details"))    { return Cmd_GetAssetDetails(Args); }
+	if (Cmd == TEXT("focus_viewport_on_actor")) { return Cmd_FocusViewportOnActor(Args); }
+	if (Cmd == TEXT("get_viewport_info"))    { return Cmd_GetViewportInfo(); }
+	if (Cmd == TEXT("get_actor_property"))   { return Cmd_GetActorProperty(Args); }
 	if (Cmd == TEXT("cast_ray"))              { return Cmd_CastRay(Args); }
 	if (Cmd == TEXT("query_navmesh"))         { return Cmd_QueryNavMesh(Args); }
 	if (Cmd == TEXT("begin_transaction"))     { return Cmd_BeginTransaction(Args); }
@@ -563,6 +1301,10 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("run_verification"))      { return Cmd_RunVerification(Args); }
 	if (Cmd == TEXT("enforce_constitution"))  { return Cmd_EnforceConstitution(Args); }
 	if (Cmd == TEXT("get_forge_status"))      { return Cmd_GetForgeStatus(); }
+	if (Cmd == TEXT("llm_chat"))              { return Cmd_LLMChat(Args); }
+	if (Cmd == TEXT("llm_structured"))        { return Cmd_LLMStructured(Args); }
+	if (Cmd == TEXT("llm_set_key"))           { return Cmd_LLMSetKey(Args); }
+	if (Cmd == TEXT("llm_get_models"))        { return Cmd_LLMGetModels(Args); }
 	if (Cmd == TEXT("set_viewport_camera"))   { return Cmd_SetViewportCamera(Args); }
 	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
 	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController Blueprint
@@ -670,6 +1412,18 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	// commands we intentionally skip Phase 2 and rely on preflight + real execution.
 	const bool bSkipSnapshotRollbackForCommand =
 		Cmd == TEXT("spawn_actor") ||
+		Cmd == TEXT("duplicate_actor") ||
+		Cmd == TEXT("spawn_point_light") ||
+		Cmd == TEXT("spawn_spot_light") ||
+		Cmd == TEXT("spawn_rect_light") ||
+		Cmd == TEXT("spawn_directional_light") ||
+		Cmd == TEXT("set_actor_label") ||
+		Cmd == TEXT("group_actors") ||
+		Cmd == TEXT("create_wall") ||
+		Cmd == TEXT("create_floor") ||
+		Cmd == TEXT("create_room") ||
+		Cmd == TEXT("create_corridor") ||
+		Cmd == TEXT("create_pillar") ||
 		Cmd == TEXT("create_blueprint") ||
 		Cmd == TEXT("create_material_instance") ||
 		Cmd == TEXT("rename_asset") ||
@@ -689,11 +1443,24 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 				// Changes are intentionally undone — this is the safety proof.
 				FString Dummy;
 				if (Cmd == TEXT("spawn_actor"))                  { Dummy = Cmd_SpawnActor(Args); }
+				else if (Cmd == TEXT("duplicate_actor"))        { Dummy = Cmd_DuplicateActor(Args); }
 				else if (Cmd == TEXT("spawn_point_light"))       { Dummy = Cmd_SpawnPointLight(Args); }
 				else if (Cmd == TEXT("spawn_spot_light"))        { Dummy = Cmd_SpawnSpotLight(Args); }
+				else if (Cmd == TEXT("spawn_rect_light"))        { Dummy = Cmd_SpawnRectLight(Args); }
+				else if (Cmd == TEXT("spawn_directional_light")) { Dummy = Cmd_SpawnDirectionalLight(Args); }
 				else if (Cmd == TEXT("set_actor_transform"))     { Dummy = Cmd_SetActorTransform(Args); }
 				else if (Cmd == TEXT("set_static_mesh"))         { Dummy = Cmd_SetStaticMesh(Args); }
 				else if (Cmd == TEXT("set_actor_scale"))         { Dummy = Cmd_SetActorScale(Args); }
+				else if (Cmd == TEXT("set_actor_label"))         { Dummy = Cmd_SetActorLabel(Args); }
+				else if (Cmd == TEXT("set_actor_mobility"))      { Dummy = Cmd_SetActorMobility(Args); }
+				else if (Cmd == TEXT("set_actor_visibility"))    { Dummy = Cmd_SetActorVisibility(Args); }
+				else if (Cmd == TEXT("group_actors"))            { Dummy = Cmd_GroupActors(Args); }
+				else if (Cmd == TEXT("set_actor_property"))      { Dummy = Cmd_SetActorProperty(Args); }
+				else if (Cmd == TEXT("create_wall"))             { Dummy = Cmd_CreateWall(Args); }
+				else if (Cmd == TEXT("create_floor"))            { Dummy = Cmd_CreateFloor(Args); }
+				else if (Cmd == TEXT("create_room"))             { Dummy = Cmd_CreateRoom(Args); }
+				else if (Cmd == TEXT("create_corridor"))         { Dummy = Cmd_CreateCorridor(Args); }
+				else if (Cmd == TEXT("create_pillar"))           { Dummy = Cmd_CreatePillar(Args); }
 				else if (Cmd == TEXT("delete_actor"))            { Dummy = Cmd_DeleteActor(Args); }
 				else if (Cmd == TEXT("create_blueprint"))        { Dummy = Cmd_CreateBlueprint(Args); }
 				else if (Cmd == TEXT("compile_blueprint"))       { Dummy = Cmd_CompileBlueprint(Args); }
@@ -735,11 +1502,24 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	// now we execute again inside the real open transaction).
 	FString CommandResult;
 	if (Cmd == TEXT("spawn_actor"))              { CommandResult = Cmd_SpawnActor(Args); }
+	else if (Cmd == TEXT("duplicate_actor"))     { CommandResult = Cmd_DuplicateActor(Args); }
 	else if (Cmd == TEXT("spawn_point_light"))   { CommandResult = Cmd_SpawnPointLight(Args); }
 	else if (Cmd == TEXT("spawn_spot_light"))    { CommandResult = Cmd_SpawnSpotLight(Args); }
+	else if (Cmd == TEXT("spawn_rect_light"))    { CommandResult = Cmd_SpawnRectLight(Args); }
+	else if (Cmd == TEXT("spawn_directional_light")) { CommandResult = Cmd_SpawnDirectionalLight(Args); }
 	else if (Cmd == TEXT("set_actor_transform")) { CommandResult = Cmd_SetActorTransform(Args); }
 	else if (Cmd == TEXT("set_static_mesh"))     { CommandResult = Cmd_SetStaticMesh(Args); }
 	else if (Cmd == TEXT("set_actor_scale"))     { CommandResult = Cmd_SetActorScale(Args); }
+	else if (Cmd == TEXT("set_actor_label"))     { CommandResult = Cmd_SetActorLabel(Args); }
+	else if (Cmd == TEXT("set_actor_mobility"))  { CommandResult = Cmd_SetActorMobility(Args); }
+	else if (Cmd == TEXT("set_actor_visibility")) { CommandResult = Cmd_SetActorVisibility(Args); }
+	else if (Cmd == TEXT("group_actors"))        { CommandResult = Cmd_GroupActors(Args); }
+	else if (Cmd == TEXT("set_actor_property"))  { CommandResult = Cmd_SetActorProperty(Args); }
+	else if (Cmd == TEXT("create_wall"))         { CommandResult = Cmd_CreateWall(Args); }
+	else if (Cmd == TEXT("create_floor"))        { CommandResult = Cmd_CreateFloor(Args); }
+	else if (Cmd == TEXT("create_room"))         { CommandResult = Cmd_CreateRoom(Args); }
+	else if (Cmd == TEXT("create_corridor"))     { CommandResult = Cmd_CreateCorridor(Args); }
+	else if (Cmd == TEXT("create_pillar"))       { CommandResult = Cmd_CreatePillar(Args); }
 	else if (Cmd == TEXT("delete_actor"))        { CommandResult = Cmd_DeleteActor(Args); }
 	else if (Cmd == TEXT("create_blueprint"))    { CommandResult = Cmd_CreateBlueprint(Args); }
 	else if (Cmd == TEXT("compile_blueprint"))   { CommandResult = Cmd_CompileBlueprint(Args); }
@@ -1635,6 +2415,361 @@ FString UAgentForgeLibrary::Cmd_GetAvailableMaterials(const TSharedPtr<FJsonObje
 #endif
 }
 
+FString UAgentForgeLibrary::Cmd_GetAvailableBlueprints(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString SearchFilter;
+	FString ParentClassFilter;
+	FString PathFilter;
+	int32 MaxResults = 50;
+	if (Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("search_filter"), SearchFilter);
+		Args->TryGetStringField(TEXT("parent_class"), ParentClassFilter);
+		Args->TryGetStringField(TEXT("path_filter"), PathFilter);
+		if (Args->HasField(TEXT("max_results")))
+		{
+			MaxResults = FMath::Max(1, (int32)Args->GetNumberField(TEXT("max_results")));
+		}
+	}
+
+	FString ParentNeedle = ParentClassFilter;
+	ParentNeedle.ToLowerInline();
+
+	FAssetRegistryModule& RegistryModule =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+
+	FARFilter Filter;
+	Filter.bRecursivePaths = true;
+	Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+	if (!PathFilter.IsEmpty())
+	{
+		Filter.PackagePaths.Add(*PathFilter);
+	}
+
+	TArray<FAssetData> Assets;
+	RegistryModule.Get().GetAssets(Filter, Assets);
+	Assets.Sort([](const FAssetData& A, const FAssetData& B)
+	{
+		return A.AssetName.LexicalLess(B.AssetName);
+	});
+
+	const FString SearchNeedle = SearchFilter.ToLower();
+	TArray<TSharedPtr<FJsonValue>> Results;
+	for (const FAssetData& Asset : Assets)
+	{
+		const FString AssetName = Asset.AssetName.ToString();
+		if (!SearchNeedle.IsEmpty() && !AssetName.ToLower().Contains(SearchNeedle))
+		{
+			continue;
+		}
+
+		const FString ParentClassPath = Asset.GetTagValueRef<FString>(FBlueprintTags::ParentClassPath);
+		const FString NativeParentClassPath = Asset.GetTagValueRef<FString>(FBlueprintTags::NativeParentClassPath);
+		const FString GeneratedClassPath = Asset.GetTagValueRef<FString>(FBlueprintTags::GeneratedClassPath);
+		if (!ParentNeedle.IsEmpty())
+		{
+			FString Haystack = ParentClassPath + TEXT(" ") + NativeParentClassPath + TEXT(" ") + GeneratedClassPath;
+			Haystack.ToLowerInline();
+			if (!Haystack.Contains(ParentNeedle))
+			{
+				continue;
+			}
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("asset_name"), AssetName);
+		Entry->SetStringField(TEXT("asset_path"), Asset.GetSoftObjectPath().ToString());
+		Entry->SetStringField(TEXT("package_path"), Asset.PackagePath.ToString());
+		Entry->SetStringField(TEXT("class"), Asset.AssetClassPath.GetAssetName().ToString());
+		Entry->SetStringField(TEXT("parent_class_path"), ParentClassPath);
+		Entry->SetStringField(TEXT("native_parent_class_path"), NativeParentClassPath);
+		Entry->SetStringField(TEXT("generated_class_path"), GeneratedClassPath);
+		Results.Add(MakeShared<FJsonValueObject>(Entry));
+
+		if (Results.Num() >= MaxResults)
+		{
+			break;
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("search_filter"), SearchFilter);
+	Root->SetStringField(TEXT("path_filter"), PathFilter);
+	Root->SetStringField(TEXT("parent_class"), ParentClassFilter);
+	Root->SetNumberField(TEXT("count"), Results.Num());
+	Root->SetArrayField(TEXT("assets"), Results);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GetAvailableTextures(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString SearchFilter;
+	FString PathFilter;
+	int32 MaxResults = 50;
+	if (Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("search_filter"), SearchFilter);
+		Args->TryGetStringField(TEXT("path_filter"), PathFilter);
+		if (Args->HasField(TEXT("max_results")))
+		{
+			MaxResults = FMath::Max(1, (int32)Args->GetNumberField(TEXT("max_results")));
+		}
+	}
+
+	FAssetRegistryModule& RegistryModule =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+
+	FARFilter Filter;
+	Filter.bRecursivePaths = true;
+	Filter.ClassPaths.Add(UTexture2D::StaticClass()->GetClassPathName());
+	if (!PathFilter.IsEmpty())
+	{
+		Filter.PackagePaths.Add(*PathFilter);
+	}
+
+	TArray<FAssetData> Assets;
+	RegistryModule.Get().GetAssets(Filter, Assets);
+	Assets.Sort([](const FAssetData& A, const FAssetData& B)
+	{
+		return A.AssetName.LexicalLess(B.AssetName);
+	});
+
+	const FString SearchNeedle = SearchFilter.ToLower();
+	TArray<TSharedPtr<FJsonValue>> Results;
+	for (const FAssetData& Asset : Assets)
+	{
+		const FString AssetName = Asset.AssetName.ToString();
+		if (!SearchNeedle.IsEmpty() && !AssetName.ToLower().Contains(SearchNeedle))
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("asset_name"), AssetName);
+		Entry->SetStringField(TEXT("asset_path"), Asset.GetSoftObjectPath().ToString());
+		Entry->SetStringField(TEXT("package_path"), Asset.PackagePath.ToString());
+		Entry->SetStringField(TEXT("class"), Asset.AssetClassPath.GetAssetName().ToString());
+		Results.Add(MakeShared<FJsonValueObject>(Entry));
+		if (Results.Num() >= MaxResults)
+		{
+			break;
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("search_filter"), SearchFilter);
+	Root->SetStringField(TEXT("path_filter"), PathFilter);
+	Root->SetNumberField(TEXT("count"), Results.Num());
+	Root->SetArrayField(TEXT("assets"), Results);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GetAvailableSounds(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString SearchFilter;
+	FString PathFilter;
+	int32 MaxResults = 50;
+	if (Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("search_filter"), SearchFilter);
+		Args->TryGetStringField(TEXT("path_filter"), PathFilter);
+		if (Args->HasField(TEXT("max_results")))
+		{
+			MaxResults = FMath::Max(1, (int32)Args->GetNumberField(TEXT("max_results")));
+		}
+	}
+
+	FAssetRegistryModule& RegistryModule =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+
+	FARFilter Filter;
+	Filter.bRecursivePaths = true;
+	Filter.ClassPaths.Add(USoundWave::StaticClass()->GetClassPathName());
+	Filter.ClassPaths.Add(USoundCue::StaticClass()->GetClassPathName());
+	if (!PathFilter.IsEmpty())
+	{
+		Filter.PackagePaths.Add(*PathFilter);
+	}
+
+	TArray<FAssetData> Assets;
+	RegistryModule.Get().GetAssets(Filter, Assets);
+	Assets.Sort([](const FAssetData& A, const FAssetData& B)
+	{
+		return A.AssetName.LexicalLess(B.AssetName);
+	});
+
+	const FString SearchNeedle = SearchFilter.ToLower();
+	TArray<TSharedPtr<FJsonValue>> Results;
+	for (const FAssetData& Asset : Assets)
+	{
+		const FString AssetName = Asset.AssetName.ToString();
+		if (!SearchNeedle.IsEmpty() && !AssetName.ToLower().Contains(SearchNeedle))
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("asset_name"), AssetName);
+		Entry->SetStringField(TEXT("asset_path"), Asset.GetSoftObjectPath().ToString());
+		Entry->SetStringField(TEXT("package_path"), Asset.PackagePath.ToString());
+		Entry->SetStringField(TEXT("class"), Asset.AssetClassPath.GetAssetName().ToString());
+		Results.Add(MakeShared<FJsonValueObject>(Entry));
+		if (Results.Num() >= MaxResults)
+		{
+			break;
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("search_filter"), SearchFilter);
+	Root->SetStringField(TEXT("path_filter"), PathFilter);
+	Root->SetNumberField(TEXT("count"), Results.Num());
+	Root->SetArrayField(TEXT("assets"), Results);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GetAssetDetails(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString AssetPath;
+	Args->TryGetStringField(TEXT("asset_path"), AssetPath);
+	if (AssetPath.IsEmpty())
+	{
+		return ErrorResponse(TEXT("get_asset_details requires asset_path."));
+	}
+
+	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
+	if (!Asset)
+	{
+		return ErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("asset_name"), Asset->GetName());
+	Root->SetStringField(TEXT("asset_path"), AssetPath);
+	Root->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
+	Root->SetStringField(TEXT("package"), Asset->GetOutermost() ? Asset->GetOutermost()->GetName() : FString());
+
+	if (UStaticMesh* StaticMesh = Cast<UStaticMesh>(Asset))
+	{
+		const FBoxSphereBounds Bounds = StaticMesh->GetBounds();
+		Root->SetNumberField(TEXT("lod_count"), StaticMesh->GetNumLODs());
+		Root->SetObjectField(TEXT("bounds_origin"), VecToJson(Bounds.Origin));
+		Root->SetObjectField(TEXT("bounds_extent"), VecToJson(Bounds.BoxExtent));
+	}
+	else if (UMaterialInterface* Material = Cast<UMaterialInterface>(Asset))
+	{
+		TArray<FMaterialParameterInfo> ScalarInfos;
+		TArray<FGuid> ScalarIds;
+		TArray<FMaterialParameterInfo> VectorInfos;
+		TArray<FGuid> VectorIds;
+		Material->GetAllScalarParameterInfo(ScalarInfos, ScalarIds);
+		Material->GetAllVectorParameterInfo(VectorInfos, VectorIds);
+
+		TArray<TSharedPtr<FJsonValue>> ScalarNames;
+		for (const FMaterialParameterInfo& Info : ScalarInfos)
+		{
+			ScalarNames.Add(MakeShared<FJsonValueString>(Info.Name.ToString()));
+		}
+
+		TArray<TSharedPtr<FJsonValue>> VectorNames;
+		for (const FMaterialParameterInfo& Info : VectorInfos)
+		{
+			VectorNames.Add(MakeShared<FJsonValueString>(Info.Name.ToString()));
+		}
+
+		Root->SetArrayField(TEXT("scalar_parameters"), ScalarNames);
+		Root->SetArrayField(TEXT("vector_parameters"), VectorNames);
+	}
+	else if (UTexture2D* Texture = Cast<UTexture2D>(Asset))
+	{
+		Root->SetNumberField(TEXT("size_x"), Texture->GetSizeX());
+		Root->SetNumberField(TEXT("size_y"), Texture->GetSizeY());
+	}
+	else if (USoundBase* Sound = Cast<USoundBase>(Asset))
+	{
+		Root->SetNumberField(TEXT("duration"), Sound->GetDuration());
+	}
+	else if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
+	{
+		Root->SetStringField(TEXT("generated_class_path"), Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetPathName() : FString());
+		Root->SetStringField(TEXT("parent_class"), Blueprint->ParentClass ? Blueprint->ParentClass->GetPathName() : FString());
+	}
+
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_FocusViewportOnActor(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	AActor* Actor = FindActorByLabelOrName(ActorName);
+	if (!Actor)
+	{
+		return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName));
+	}
+
+	GEditor->MoveViewportCamerasToActor(*Actor, false);
+	GEditor->RedrawAllViewports();
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
+	Root->SetStringField(TEXT("actor_object_path"), Actor->GetPathName());
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GetViewportInfo()
+{
+#if WITH_EDITOR
+	FLevelEditorViewportClient* ViewportClient = GetPrimaryPerspectiveViewportClient();
+	if (!ViewportClient)
+	{
+		return ErrorResponse(TEXT("No perspective level viewport available."));
+	}
+
+	const FVector ViewLocation = ViewportClient->GetViewLocation();
+	const FRotator ViewRotation = ViewportClient->GetViewRotation();
+	const FIntPoint SizeXY = ViewportClient->Viewport ? ViewportClient->Viewport->GetSizeXY() : FIntPoint::ZeroValue;
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetObjectField(TEXT("location"), VecToJson(ViewLocation));
+	Root->SetNumberField(TEXT("pitch"), ViewRotation.Pitch);
+	Root->SetNumberField(TEXT("yaw"), ViewRotation.Yaw);
+	Root->SetNumberField(TEXT("roll"), ViewRotation.Roll);
+	Root->SetNumberField(TEXT("fov"), ViewportClient->ViewFOV);
+	Root->SetNumberField(TEXT("width"), SizeXY.X);
+	Root->SetNumberField(TEXT("height"), SizeXY.Y);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
 FString UAgentForgeLibrary::Cmd_SetViewportCamera(const TSharedPtr<FJsonObject>& Args)
 {
 #if WITH_EDITOR
@@ -1714,6 +2849,47 @@ FString UAgentForgeLibrary::Cmd_SpawnActor(const TSharedPtr<FJsonObject>& Args)
 	Obj->SetStringField(TEXT("spawned_name"), Spawned->GetName());
 	Obj->SetStringField(TEXT("spawned_object_path"), Spawned->GetPathName());
 	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_DuplicateActor(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	AActor* SourceActor = FindActorByLabelOrName(ActorName);
+	if (!SourceActor)
+	{
+		return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName));
+	}
+
+	const FVector Offset(
+		Args->HasField(TEXT("offset_x")) ? (float)Args->GetNumberField(TEXT("offset_x")) : 0.0f,
+		Args->HasField(TEXT("offset_y")) ? (float)Args->GetNumberField(TEXT("offset_y")) : 0.0f,
+		Args->HasField(TEXT("offset_z")) ? (float)Args->GetNumberField(TEXT("offset_z")) : 0.0f);
+
+	UEditorActorSubsystem* ActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+	if (!ActorSubsystem)
+	{
+		return ErrorResponse(TEXT("EditorActorSubsystem unavailable."));
+	}
+
+	TArray<AActor*> Duplicates = ActorSubsystem->DuplicateActors({ SourceActor }, SourceActor->GetWorld(), Offset);
+	if (Duplicates.Num() == 0 || !Duplicates[0])
+	{
+		return ErrorResponse(TEXT("Failed to duplicate actor."));
+	}
+
+	AActor* Duplicate = Duplicates[0];
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("source_actor"), SourceActor->GetActorLabel());
+	Root->SetStringField(TEXT("actor_name"), Duplicate->GetActorLabel());
+	Root->SetStringField(TEXT("actor_object_path"), Duplicate->GetPathName());
+	Root->SetObjectField(TEXT("location"), VecToJson(Duplicate->GetActorLocation()));
+	return ToJsonString(Root);
 #else
 	return ErrorResponse(TEXT("Editor only."));
 #endif
@@ -1828,6 +3004,113 @@ FString UAgentForgeLibrary::Cmd_SpawnSpotLight(const TSharedPtr<FJsonObject>& Ar
 #endif
 }
 
+FString UAgentForgeLibrary::Cmd_SpawnRectLight(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float X = Args->HasField(TEXT("x")) ? (float)Args->GetNumberField(TEXT("x")) : 0.f;
+	const float Y = Args->HasField(TEXT("y")) ? (float)Args->GetNumberField(TEXT("y")) : 0.f;
+	const float Z = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.f;
+	const float RX = Args->HasField(TEXT("rx")) ? (float)Args->GetNumberField(TEXT("rx")) : 0.f;
+	const float RY = Args->HasField(TEXT("ry")) ? (float)Args->GetNumberField(TEXT("ry")) : 0.f;
+	const float RZ = Args->HasField(TEXT("rz")) ? (float)Args->GetNumberField(TEXT("rz")) : 0.f;
+	const float Intensity = Args->HasField(TEXT("intensity")) ? (float)Args->GetNumberField(TEXT("intensity")) : 5000.f;
+	const float Width = Args->HasField(TEXT("width")) ? (float)Args->GetNumberField(TEXT("width")) : 100.f;
+	const float Height = Args->HasField(TEXT("height")) ? (float)Args->GetNumberField(TEXT("height")) : 100.f;
+	const float ColorR = Args->HasField(TEXT("color_r")) ? (float)Args->GetNumberField(TEXT("color_r")) : 1.f;
+	const float ColorG = Args->HasField(TEXT("color_g")) ? (float)Args->GetNumberField(TEXT("color_g")) : 1.f;
+	const float ColorB = Args->HasField(TEXT("color_b")) ? (float)Args->GetNumberField(TEXT("color_b")) : 1.f;
+	FString Label;
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ARectLight* LightActor = World->SpawnActor<ARectLight>(
+		ARectLight::StaticClass(),
+		FVector(X, Y, Z),
+		FRotator(RX, RY, RZ),
+		Params);
+	if (!LightActor) { return ErrorResponse(TEXT("Failed to spawn rect light.")); }
+
+	if (!Label.IsEmpty())
+	{
+		LightActor->SetActorLabel(Label);
+	}
+
+	URectLightComponent* LightComp = Cast<URectLightComponent>(LightActor->GetLightComponent());
+	if (!LightComp) { return ErrorResponse(TEXT("Spawned rect light has no light component.")); }
+
+	LightActor->Modify();
+	LightComp->Modify();
+	LightComp->SetMobility(EComponentMobility::Movable);
+	LightComp->SetIntensity(Intensity);
+	LightComp->SetLightColor(FLinearColor(ColorR, ColorG, ColorB), false);
+	LightComp->SetSourceWidth(Width);
+	LightComp->SetSourceHeight(Height);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("spawned_name"), LightActor->GetName());
+	Root->SetStringField(TEXT("spawned_object_path"), LightActor->GetPathName());
+	Root->SetStringField(TEXT("label"), LightActor->GetActorLabel());
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SpawnDirectionalLight(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float RX = Args->HasField(TEXT("rx")) ? (float)Args->GetNumberField(TEXT("rx")) : -45.f;
+	const float RY = Args->HasField(TEXT("ry")) ? (float)Args->GetNumberField(TEXT("ry")) : 0.f;
+	const float RZ = Args->HasField(TEXT("rz")) ? (float)Args->GetNumberField(TEXT("rz")) : 0.f;
+	const float Intensity = Args->HasField(TEXT("intensity")) ? (float)Args->GetNumberField(TEXT("intensity")) : 10.f;
+	const float ColorR = Args->HasField(TEXT("color_r")) ? (float)Args->GetNumberField(TEXT("color_r")) : 1.f;
+	const float ColorG = Args->HasField(TEXT("color_g")) ? (float)Args->GetNumberField(TEXT("color_g")) : 1.f;
+	const float ColorB = Args->HasField(TEXT("color_b")) ? (float)Args->GetNumberField(TEXT("color_b")) : 1.f;
+	FString Label;
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ADirectionalLight* LightActor = World->SpawnActor<ADirectionalLight>(
+		ADirectionalLight::StaticClass(),
+		FVector::ZeroVector,
+		FRotator(RX, RY, RZ),
+		Params);
+	if (!LightActor) { return ErrorResponse(TEXT("Failed to spawn directional light.")); }
+
+	if (!Label.IsEmpty())
+	{
+		LightActor->SetActorLabel(Label);
+	}
+
+	ULightComponent* LightComp = LightActor->GetLightComponent();
+	if (!LightComp) { return ErrorResponse(TEXT("Spawned directional light has no light component.")); }
+
+	LightActor->Modify();
+	LightComp->Modify();
+	LightComp->SetMobility(EComponentMobility::Movable);
+	LightComp->SetIntensity(Intensity);
+	LightComp->SetLightColor(FLinearColor(ColorR, ColorG, ColorB), false);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("spawned_name"), LightActor->GetName());
+	Root->SetStringField(TEXT("spawned_object_path"), LightActor->GetPathName());
+	Root->SetStringField(TEXT("label"), LightActor->GetActorLabel());
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
 FString UAgentForgeLibrary::Cmd_SetActorTransform(const TSharedPtr<FJsonObject>& Args)
 {
 #if WITH_EDITOR
@@ -1913,6 +3196,739 @@ FString UAgentForgeLibrary::Cmd_SetActorScale(const TSharedPtr<FJsonObject>& Arg
 	Obj->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
 	Obj->SetObjectField(TEXT("scale"), VecToJson(NewScale));
 	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetActorLabel(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	FString NewLabel;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	Args->TryGetStringField(TEXT("new_label"), NewLabel);
+	AActor* Actor = FindActorByLabelOrName(ActorName);
+	if (!Actor) { return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName)); }
+	if (NewLabel.IsEmpty()) { return ErrorResponse(TEXT("set_actor_label requires new_label.")); }
+
+	Actor->Modify();
+	Actor->SetActorLabel(NewLabel);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
+	Root->SetStringField(TEXT("actor_object_path"), Actor->GetPathName());
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetActorMobility(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	FString MobilityString;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	Args->TryGetStringField(TEXT("mobility"), MobilityString);
+	AActor* Actor = FindActorByLabelOrName(ActorName);
+	if (!Actor) { return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName)); }
+
+	EComponentMobility::Type Mobility = EComponentMobility::Static;
+	if (!ParseMobilityValue(MobilityString, Mobility))
+	{
+		return ErrorResponse(TEXT("mobility must be Static, Stationary, or Movable."));
+	}
+
+	TInlineComponentArray<USceneComponent*> SceneComponents(Actor);
+	for (USceneComponent* Component : SceneComponents)
+	{
+		if (Component)
+		{
+			Component->Modify();
+			Component->SetMobility(Mobility);
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
+	Root->SetStringField(TEXT("mobility"), MobilityString);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetActorVisibility(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	const bool bVisible = !Args->HasField(TEXT("visible")) || Args->GetBoolField(TEXT("visible"));
+
+	AActor* Actor = FindActorByLabelOrName(ActorName);
+	if (!Actor) { return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName)); }
+
+	Actor->Modify();
+	Actor->SetIsTemporarilyHiddenInEditor(!bVisible);
+	Actor->SetActorHiddenInGame(!bVisible);
+
+	TInlineComponentArray<USceneComponent*> SceneComponents(Actor);
+	for (USceneComponent* Component : SceneComponents)
+	{
+		if (Component)
+		{
+			Component->Modify();
+			Component->SetVisibility(bVisible, true);
+		}
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
+	Root->SetBoolField(TEXT("visible"), bVisible);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GroupActors(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const TArray<TSharedPtr<FJsonValue>>* ActorNames = nullptr;
+	if (!Args->TryGetArrayField(TEXT("actor_names"), ActorNames) || !ActorNames || ActorNames->Num() == 0)
+	{
+		return ErrorResponse(TEXT("group_actors requires actor_names."));
+	}
+
+	FString GroupName = TEXT("ActorGroup");
+	Args->TryGetStringField(TEXT("group_name"), GroupName);
+
+	TArray<AActor*> ActorsToGroup;
+	FVector AverageLocation = FVector::ZeroVector;
+	for (const TSharedPtr<FJsonValue>& Entry : *ActorNames)
+	{
+		const FString ActorName = Entry.IsValid() ? Entry->AsString() : FString();
+		AActor* Actor = FindActorByLabelOrName(ActorName);
+		if (!Actor)
+		{
+			return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName));
+		}
+		ActorsToGroup.Add(Actor);
+		AverageLocation += Actor->GetActorLocation();
+	}
+
+	AverageLocation /= FMath::Max(1, ActorsToGroup.Num());
+
+	FString GroupError;
+	AActor* GroupActor = SpawnGroupActor(GetEditorWorld(), GroupName, AverageLocation, GroupError);
+	if (!GroupActor)
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Children;
+	for (AActor* Actor : ActorsToGroup)
+	{
+		AttachActorToParent(Actor, GroupActor);
+		AddActorSummary(Children, Actor);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("group_name"), GroupActor->GetActorLabel());
+	Root->SetStringField(TEXT("group_object_path"), GroupActor->GetPathName());
+	Root->SetArrayField(TEXT("children"), Children);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_GetActorProperty(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	FString PropertyName;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	Args->TryGetStringField(TEXT("property_name"), PropertyName);
+	AActor* Actor = FindActorByLabelOrName(ActorName);
+	if (!Actor) { return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName)); }
+	if (PropertyName.IsEmpty()) { return ErrorResponse(TEXT("get_actor_property requires property_name.")); }
+
+	FString LeafName;
+	FString ResolveError;
+	UObject* ContainerObject = ResolvePropertyContainer(Actor, PropertyName, LeafName, ResolveError);
+	if (!ContainerObject)
+	{
+		return ErrorResponse(ResolveError);
+	}
+
+	FString ExportedValue;
+	if (!ExportResolvedPropertyValue(ContainerObject, LeafName, ExportedValue, ResolveError))
+	{
+		return ErrorResponse(ResolveError);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
+	Root->SetStringField(TEXT("property_name"), PropertyName);
+	Root->SetStringField(TEXT("value"), ExportedValue);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetActorProperty(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ActorName;
+	FString PropertyName;
+	FString Value;
+	Args->TryGetStringField(TEXT("actor_name"), ActorName);
+	Args->TryGetStringField(TEXT("property_name"), PropertyName);
+	Args->TryGetStringField(TEXT("value"), Value);
+	AActor* Actor = FindActorByLabelOrName(ActorName);
+	if (!Actor) { return ErrorResponse(FString::Printf(TEXT("Actor not found: %s"), *ActorName)); }
+	if (PropertyName.IsEmpty()) { return ErrorResponse(TEXT("set_actor_property requires property_name.")); }
+
+	FString LeafName;
+	FString ResolveError;
+	UObject* ContainerObject = ResolvePropertyContainer(Actor, PropertyName, LeafName, ResolveError);
+	if (!ContainerObject)
+	{
+		return ErrorResponse(ResolveError);
+	}
+
+	if (!ImportResolvedPropertyValue(ContainerObject, LeafName, Value, ResolveError))
+	{
+		return ErrorResponse(ResolveError);
+	}
+
+	FString ExportedValue;
+	ExportResolvedPropertyValue(ContainerObject, LeafName, ExportedValue, ResolveError);
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Actor->GetActorLabel());
+	Root->SetStringField(TEXT("property_name"), PropertyName);
+	Root->SetStringField(TEXT("value"), ExportedValue);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_CreateWall(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float StartX = Args->HasField(TEXT("start_x")) ? (float)Args->GetNumberField(TEXT("start_x")) : 0.0f;
+	const float StartY = Args->HasField(TEXT("start_y")) ? (float)Args->GetNumberField(TEXT("start_y")) : 0.0f;
+	const float EndX = Args->HasField(TEXT("end_x")) ? (float)Args->GetNumberField(TEXT("end_x")) : 0.0f;
+	const float EndY = Args->HasField(TEXT("end_y")) ? (float)Args->GetNumberField(TEXT("end_y")) : 0.0f;
+	const float Height = Args->HasField(TEXT("height")) ? (float)Args->GetNumberField(TEXT("height")) : 300.0f;
+	const float Thickness = Args->HasField(TEXT("thickness")) ? (float)Args->GetNumberField(TEXT("thickness")) : 20.0f;
+	const float BaseZ = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.0f;
+	const bool bHasWindows = Args->HasField(TEXT("has_windows")) && Args->GetBoolField(TEXT("has_windows"));
+	const float WindowSpacing = Args->HasField(TEXT("window_spacing")) ? (float)Args->GetNumberField(TEXT("window_spacing")) : 220.0f;
+	const float WindowHeight = Args->HasField(TEXT("window_height")) ? (float)Args->GetNumberField(TEXT("window_height")) : 120.0f;
+	FString MaterialPath;
+	FString Label = TEXT("Wall");
+	Args->TryGetStringField(TEXT("material_path"), MaterialPath);
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	TArray<AActor*> Segments;
+	const FString WallError = SpawnLinearWallSegments(
+		World,
+		FVector(StartX, StartY, 0.0f),
+		FVector(EndX, EndY, 0.0f),
+		BaseZ,
+		Height,
+		Thickness,
+		MaterialPath,
+		Label,
+		bHasWindows,
+		WindowSpacing,
+		WindowHeight,
+		nullptr,
+		Segments);
+	if (!WallError.IsEmpty())
+	{
+		return ErrorResponse(WallError);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> SegmentArray;
+	for (AActor* Segment : Segments)
+	{
+		AddActorSummary(SegmentArray, Segment);
+	}
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("label"), Label);
+	Obj->SetNumberField(TEXT("segment_count"), Segments.Num());
+	Obj->SetArrayField(TEXT("segments"), SegmentArray);
+	if (Segments.Num() > 0)
+	{
+		Obj->SetStringField(TEXT("actor_name"), Segments[0]->GetActorLabel());
+		Obj->SetStringField(TEXT("actor_object_path"), Segments[0]->GetPathName());
+	}
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_CreateFloor(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float CenterX = Args->HasField(TEXT("center_x")) ? (float)Args->GetNumberField(TEXT("center_x")) : 0.0f;
+	const float CenterY = Args->HasField(TEXT("center_y")) ? (float)Args->GetNumberField(TEXT("center_y")) : 0.0f;
+	const float SurfaceZ = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.0f;
+	const float Width = Args->HasField(TEXT("width")) ? (float)Args->GetNumberField(TEXT("width")) : 500.0f;
+	const float Length = Args->HasField(TEXT("length")) ? (float)Args->GetNumberField(TEXT("length")) : 500.0f;
+	const float Thickness = Args->HasField(TEXT("thickness")) ? (float)Args->GetNumberField(TEXT("thickness")) : 10.0f;
+	FString MaterialPath;
+	FString Label = TEXT("Floor");
+	Args->TryGetStringField(TEXT("material_path"), MaterialPath);
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString SpawnError;
+	AStaticMeshActor* FloorActor = SpawnBoxActor(
+		World,
+		FVector(CenterX, CenterY, SurfaceZ - (Thickness * 0.5f)),
+		FVector(Width, Length, Thickness),
+		FRotator::ZeroRotator,
+		Label,
+		MaterialPath,
+		SpawnError);
+	if (!FloorActor)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("actor_name"), FloorActor->GetActorLabel());
+	Obj->SetStringField(TEXT("actor_object_path"), FloorActor->GetPathName());
+	Obj->SetNumberField(TEXT("width"), Width);
+	Obj->SetNumberField(TEXT("length"), Length);
+	Obj->SetNumberField(TEXT("thickness"), Thickness);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_CreateRoom(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float CenterX = Args->HasField(TEXT("center_x")) ? (float)Args->GetNumberField(TEXT("center_x")) : 0.0f;
+	const float CenterY = Args->HasField(TEXT("center_y")) ? (float)Args->GetNumberField(TEXT("center_y")) : 0.0f;
+	const float BaseZ = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.0f;
+	const float Width = Args->HasField(TEXT("width")) ? (float)Args->GetNumberField(TEXT("width")) : 500.0f;
+	const float Length = Args->HasField(TEXT("length")) ? (float)Args->GetNumberField(TEXT("length")) : 600.0f;
+	const float Height = Args->HasField(TEXT("height")) ? (float)Args->GetNumberField(TEXT("height")) : 300.0f;
+	const float WallThickness = Args->HasField(TEXT("wall_thickness")) ? (float)Args->GetNumberField(TEXT("wall_thickness")) : 20.0f;
+	const float SlabThickness = Args->HasField(TEXT("slab_thickness")) ? (float)Args->GetNumberField(TEXT("slab_thickness")) : 10.0f;
+	FString FloorMaterial;
+	FString WallMaterial;
+	FString CeilingMaterial;
+	FString DoorWall;
+	FString Label = TEXT("Room");
+	Args->TryGetStringField(TEXT("floor_material"), FloorMaterial);
+	Args->TryGetStringField(TEXT("wall_material"), WallMaterial);
+	Args->TryGetStringField(TEXT("ceiling_material"), CeilingMaterial);
+	Args->TryGetStringField(TEXT("door_wall"), DoorWall);
+	Args->TryGetStringField(TEXT("label"), Label);
+	DoorWall.ToLowerInline();
+
+	TSet<FString> WindowWalls;
+	const TArray<TSharedPtr<FJsonValue>>* WindowWallArray = nullptr;
+	if (Args->TryGetArrayField(TEXT("window_walls"), WindowWallArray))
+	{
+		for (const TSharedPtr<FJsonValue>& Entry : *WindowWallArray)
+		{
+			FString WallName;
+			if (Entry.IsValid() && Entry->TryGetString(WallName))
+			{
+				WallName.ToLowerInline();
+				WindowWalls.Add(WallName);
+			}
+		}
+	}
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString GroupError;
+	AActor* GroupActor = SpawnGroupActor(World, Label, FVector(CenterX, CenterY, BaseZ), GroupError);
+	if (!GroupActor)
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	TArray<AActor*> RoomActors;
+	auto SpawnRoomBox = [&](const FString& ChildLabel, const FVector& Center, const FVector& Dimensions, const FRotator& Rotation, const FString& MaterialPath) -> bool
+	{
+		FString SpawnError;
+		AStaticMeshActor* ChildActor = SpawnBoxActor(World, Center, Dimensions, Rotation, ChildLabel, MaterialPath, SpawnError);
+		if (!ChildActor)
+		{
+			GroupError = SpawnError;
+			return false;
+		}
+		AttachActorToParent(ChildActor, GroupActor);
+		RoomActors.Add(ChildActor);
+		return true;
+	};
+
+	if (!SpawnRoomBox(
+		Label + TEXT("_Floor"),
+		FVector(CenterX, CenterY, BaseZ - (SlabThickness * 0.5f)),
+		FVector(Width, Length, SlabThickness),
+		FRotator::ZeroRotator,
+		FloorMaterial))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	if (!SpawnRoomBox(
+		Label + TEXT("_Ceiling"),
+		FVector(CenterX, CenterY, BaseZ + Height + (SlabThickness * 0.5f)),
+		FVector(Width, Length, SlabThickness),
+		FRotator::ZeroRotator,
+		CeilingMaterial.IsEmpty() ? FloorMaterial : CeilingMaterial))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	auto SpawnDoorWall = [&](const FString& Prefix, const FVector& Start, const FVector& End) -> bool
+	{
+		const FVector Delta = End - Start;
+		const float WallLength = Delta.Size();
+		if (WallLength <= KINDA_SMALL_NUMBER)
+		{
+			GroupError = TEXT("Door wall length is zero.");
+			return false;
+		}
+
+		const FVector Direction = Delta / WallLength;
+		const float YawDeg = FMath::RadiansToDegrees(FMath::Atan2(Delta.Y, Delta.X));
+		const FRotator Rotation(0.0f, YawDeg, 0.0f);
+		const float DoorWidth = FMath::Min(120.0f, WallLength * 0.45f);
+		const float DoorHeight = FMath::Min(220.0f, Height - 40.0f);
+		const float SideLength = FMath::Max(0.0f, (WallLength - DoorWidth) * 0.5f);
+		int32 SegmentIndex = 0;
+
+		auto SpawnSegment = [&](float StartAlong, float SegmentLength, float BottomZ, float SegmentHeight) -> bool
+		{
+			if (SegmentLength <= KINDA_SMALL_NUMBER || SegmentHeight <= KINDA_SMALL_NUMBER)
+			{
+				return true;
+			}
+
+			const FVector SegmentCenter =
+				Start +
+				Direction * (StartAlong + (SegmentLength * 0.5f)) +
+				FVector(0.0f, 0.0f, BottomZ + (SegmentHeight * 0.5f));
+			return SpawnRoomBox(
+				FString::Printf(TEXT("%s_%02d"), *Prefix, ++SegmentIndex),
+				SegmentCenter,
+				FVector(SegmentLength, WallThickness, SegmentHeight),
+				Rotation,
+				WallMaterial);
+		};
+
+		if (!SpawnSegment(0.0f, SideLength, BaseZ, Height)) { return false; }
+		if (!SpawnSegment(SideLength + DoorWidth, SideLength, BaseZ, Height)) { return false; }
+		if (!SpawnSegment(SideLength, DoorWidth, BaseZ + DoorHeight, Height - DoorHeight)) { return false; }
+		return true;
+	};
+
+	auto SpawnFullWall = [&](const FString& DirectionName, const FVector& Start, const FVector& End) -> bool
+	{
+		const bool bHasWindows = WindowWalls.Contains(DirectionName);
+		TArray<AActor*> WallSegments;
+		const FString WallError = SpawnLinearWallSegments(
+			World,
+			Start,
+			End,
+			BaseZ,
+			Height,
+			WallThickness,
+			WallMaterial,
+			Label + TEXT("_") + DirectionName + TEXT("Wall"),
+			bHasWindows,
+			220.0f,
+			120.0f,
+			GroupActor,
+			WallSegments);
+		if (!WallError.IsEmpty())
+		{
+			GroupError = WallError;
+			return false;
+		}
+		RoomActors.Append(WallSegments);
+		return true;
+	};
+
+	const float HalfWidth = Width * 0.5f;
+	const float HalfLength = Length * 0.5f;
+	const FVector NorthStart(CenterX - HalfWidth, CenterY + HalfLength - (WallThickness * 0.5f), 0.0f);
+	const FVector NorthEnd(CenterX + HalfWidth, CenterY + HalfLength - (WallThickness * 0.5f), 0.0f);
+	const FVector SouthStart(CenterX - HalfWidth, CenterY - HalfLength + (WallThickness * 0.5f), 0.0f);
+	const FVector SouthEnd(CenterX + HalfWidth, CenterY - HalfLength + (WallThickness * 0.5f), 0.0f);
+	const FVector EastStart(CenterX + HalfWidth - (WallThickness * 0.5f), CenterY - HalfLength, 0.0f);
+	const FVector EastEnd(CenterX + HalfWidth - (WallThickness * 0.5f), CenterY + HalfLength, 0.0f);
+	const FVector WestStart(CenterX - HalfWidth + (WallThickness * 0.5f), CenterY - HalfLength, 0.0f);
+	const FVector WestEnd(CenterX - HalfWidth + (WallThickness * 0.5f), CenterY + HalfLength, 0.0f);
+
+	if (DoorWall == TEXT("north"))
+	{
+		if (!SpawnDoorWall(Label + TEXT("_NorthDoorWall"), NorthStart, NorthEnd)) { return ErrorResponse(GroupError); }
+	}
+	else if (!SpawnFullWall(TEXT("north"), NorthStart, NorthEnd))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	if (DoorWall == TEXT("south"))
+	{
+		if (!SpawnDoorWall(Label + TEXT("_SouthDoorWall"), SouthStart, SouthEnd)) { return ErrorResponse(GroupError); }
+	}
+	else if (!SpawnFullWall(TEXT("south"), SouthStart, SouthEnd))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	if (DoorWall == TEXT("east"))
+	{
+		if (!SpawnDoorWall(Label + TEXT("_EastDoorWall"), EastStart, EastEnd)) { return ErrorResponse(GroupError); }
+	}
+	else if (!SpawnFullWall(TEXT("east"), EastStart, EastEnd))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	if (DoorWall == TEXT("west"))
+	{
+		if (!SpawnDoorWall(Label + TEXT("_WestDoorWall"), WestStart, WestEnd)) { return ErrorResponse(GroupError); }
+	}
+	else if (!SpawnFullWall(TEXT("west"), WestStart, WestEnd))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ActorArray;
+	for (AActor* Actor : RoomActors)
+	{
+		AddActorSummary(ActorArray, Actor);
+	}
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("group_name"), GroupActor->GetActorLabel());
+	Obj->SetStringField(TEXT("group_object_path"), GroupActor->GetPathName());
+	Obj->SetNumberField(TEXT("child_count"), RoomActors.Num());
+	Obj->SetArrayField(TEXT("children"), ActorArray);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_CreateCorridor(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float StartX = Args->HasField(TEXT("start_x")) ? (float)Args->GetNumberField(TEXT("start_x")) : 0.0f;
+	const float StartY = Args->HasField(TEXT("start_y")) ? (float)Args->GetNumberField(TEXT("start_y")) : 0.0f;
+	const float EndX = Args->HasField(TEXT("end_x")) ? (float)Args->GetNumberField(TEXT("end_x")) : 500.0f;
+	const float EndY = Args->HasField(TEXT("end_y")) ? (float)Args->GetNumberField(TEXT("end_y")) : 0.0f;
+	const float BaseZ = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.0f;
+	const float Width = Args->HasField(TEXT("width")) ? (float)Args->GetNumberField(TEXT("width")) : 250.0f;
+	const float Height = Args->HasField(TEXT("height")) ? (float)Args->GetNumberField(TEXT("height")) : 300.0f;
+	const float WallThickness = Args->HasField(TEXT("wall_thickness")) ? (float)Args->GetNumberField(TEXT("wall_thickness")) : 20.0f;
+	const float SlabThickness = Args->HasField(TEXT("slab_thickness")) ? (float)Args->GetNumberField(TEXT("slab_thickness")) : 10.0f;
+	const bool bHasCeiling = !Args->HasField(TEXT("has_ceiling")) || Args->GetBoolField(TEXT("has_ceiling"));
+	FString WallMaterial;
+	FString FloorMaterial;
+	FString Label = TEXT("Corridor");
+	Args->TryGetStringField(TEXT("wall_material"), WallMaterial);
+	Args->TryGetStringField(TEXT("floor_material"), FloorMaterial);
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	const FVector Start(StartX, StartY, 0.0f);
+	const FVector End(EndX, EndY, 0.0f);
+	const FVector Delta = End - Start;
+	const float Length = Delta.Size();
+	if (Length <= KINDA_SMALL_NUMBER)
+	{
+		return ErrorResponse(TEXT("Corridor start/end points are identical."));
+	}
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	const FVector Direction = Delta / Length;
+	const FVector MidPoint = Start + (Delta * 0.5f);
+	const FVector RightVector = FVector(-Direction.Y, Direction.X, 0.0f);
+	const float YawDeg = FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X));
+	const FRotator Rotation(0.0f, YawDeg, 0.0f);
+
+	FString GroupError;
+	AActor* GroupActor = SpawnGroupActor(World, Label, FVector(MidPoint.X, MidPoint.Y, BaseZ), GroupError);
+	if (!GroupActor)
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	TArray<AActor*> CorridorActors;
+	auto SpawnChild = [&](const FString& ChildLabel, const FVector& Center, const FVector& Dimensions, const FString& MaterialPath) -> bool
+	{
+		FString SpawnError;
+		AStaticMeshActor* ChildActor = SpawnBoxActor(World, Center, Dimensions, Rotation, ChildLabel, MaterialPath, SpawnError);
+		if (!ChildActor)
+		{
+			GroupError = SpawnError;
+			return false;
+		}
+		AttachActorToParent(ChildActor, GroupActor);
+		CorridorActors.Add(ChildActor);
+		return true;
+	};
+
+	if (!SpawnChild(
+		Label + TEXT("_Floor"),
+		FVector(MidPoint.X, MidPoint.Y, BaseZ - (SlabThickness * 0.5f)),
+		FVector(Length, Width, SlabThickness),
+		FloorMaterial))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	if (bHasCeiling)
+	{
+		if (!SpawnChild(
+			Label + TEXT("_Ceiling"),
+			FVector(MidPoint.X, MidPoint.Y, BaseZ + Height + (SlabThickness * 0.5f)),
+			FVector(Length, Width, SlabThickness),
+			FloorMaterial))
+		{
+			return ErrorResponse(GroupError);
+		}
+	}
+
+	const FVector SideOffset = RightVector * ((Width * 0.5f) + (WallThickness * 0.5f));
+	if (!SpawnChild(
+		Label + TEXT("_Wall_Left"),
+		FVector(MidPoint.X, MidPoint.Y, BaseZ + (Height * 0.5f)) + SideOffset,
+		FVector(Length, WallThickness, Height),
+		WallMaterial))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	if (!SpawnChild(
+		Label + TEXT("_Wall_Right"),
+		FVector(MidPoint.X, MidPoint.Y, BaseZ + (Height * 0.5f)) - SideOffset,
+		FVector(Length, WallThickness, Height),
+		WallMaterial))
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ActorArray;
+	for (AActor* Actor : CorridorActors)
+	{
+		AddActorSummary(ActorArray, Actor);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("group_name"), GroupActor->GetActorLabel());
+	Root->SetStringField(TEXT("group_object_path"), GroupActor->GetPathName());
+	Root->SetNumberField(TEXT("child_count"), CorridorActors.Num());
+	Root->SetArrayField(TEXT("children"), ActorArray);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_CreatePillar(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float X = Args->HasField(TEXT("x")) ? (float)Args->GetNumberField(TEXT("x")) : 0.0f;
+	const float Y = Args->HasField(TEXT("y")) ? (float)Args->GetNumberField(TEXT("y")) : 0.0f;
+	const float Z = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.0f;
+	const float Radius = Args->HasField(TEXT("radius")) ? (float)Args->GetNumberField(TEXT("radius")) : 25.0f;
+	const float Height = Args->HasField(TEXT("height")) ? (float)Args->GetNumberField(TEXT("height")) : 300.0f;
+	const int32 Sides = Args->HasField(TEXT("sides")) ? (int32)Args->GetNumberField(TEXT("sides")) : 16;
+	FString MaterialPath;
+	FString Label = TEXT("Pillar");
+	Args->TryGetStringField(TEXT("material_path"), MaterialPath);
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	if (Radius <= KINDA_SMALL_NUMBER || Height <= KINDA_SMALL_NUMBER)
+	{
+		return ErrorResponse(TEXT("radius and height must be greater than zero."));
+	}
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString SpawnError;
+	AStaticMeshActor* PillarActor = nullptr;
+	if (Sides <= 4)
+	{
+		PillarActor = SpawnBoxActor(
+			World,
+			FVector(X, Y, Z + (Height * 0.5f)),
+			FVector(Radius * 2.0f, Radius * 2.0f, Height),
+			FRotator::ZeroRotator,
+			Label,
+			MaterialPath,
+			SpawnError);
+	}
+	else
+	{
+		UStaticMesh* CylinderMesh = GetBasicCylinderMesh();
+		PillarActor = SpawnStaticMeshPrimitiveActor(
+			World,
+			CylinderMesh,
+			FVector(X, Y, Z + (Height * 0.5f)),
+			FVector(Radius / 50.0f, Radius / 50.0f, Height / 100.0f),
+			FRotator::ZeroRotator,
+			Label,
+			MaterialPath,
+			SpawnError);
+	}
+
+	if (!PillarActor)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), PillarActor->GetActorLabel());
+	Root->SetStringField(TEXT("actor_object_path"), PillarActor->GetPathName());
+	Root->SetNumberField(TEXT("radius"), Radius);
+	Root->SetNumberField(TEXT("height"), Height);
+	Root->SetNumberField(TEXT("sides"), Sides);
+	return ToJsonString(Root);
 #else
 	return ErrorResponse(TEXT("Editor only."));
 #endif
@@ -2913,6 +4929,215 @@ FString UAgentForgeLibrary::Cmd_SetupTestLevel(const TSharedPtr<FJsonObject>& Ar
 	Obj->SetBoolField (TEXT("ok"),          true);
 	Obj->SetArrayField(TEXT("log"),         LogArr);
 	Obj->SetArrayField(TEXT("test_actors"), ActorArr);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_LLMSetKey(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ProviderString;
+	FString Key;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("provider"), ProviderString))
+	{
+		return ErrorResponse(TEXT("llm_set_key requires 'provider'."));
+	}
+	if (!Args->TryGetStringField(TEXT("key"), Key))
+	{
+		return ErrorResponse(TEXT("llm_set_key requires 'key'."));
+	}
+
+	EAgentForgeLLMProvider Provider;
+	if (!ParseLLMProviderName(ProviderString, Provider))
+	{
+		return ErrorResponse(FString::Printf(TEXT("Unknown LLM provider: %s"), *ProviderString));
+	}
+
+	UAgentForgeLLMSubsystem::SetApiKeyRuntime(Provider, Key);
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("provider"), GetLLMProviderName(Provider));
+	Obj->SetBoolField(TEXT("key_set"), !Key.IsEmpty());
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_LLMGetModels(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ProviderString;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("provider"), ProviderString))
+	{
+		return ErrorResponse(TEXT("llm_get_models requires 'provider'."));
+	}
+
+	EAgentForgeLLMProvider Provider;
+	if (!ParseLLMProviderName(ProviderString, Provider))
+	{
+		return ErrorResponse(FString::Printf(TEXT("Unknown LLM provider: %s"), *ProviderString));
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ModelValues;
+	for (const FString& Model : UAgentForgeLLMSubsystem::GetAvailableModels(Provider))
+	{
+		ModelValues.Add(MakeShared<FJsonValueString>(Model));
+	}
+
+	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
+	Obj->SetBoolField(TEXT("ok"), true);
+	Obj->SetStringField(TEXT("provider"), GetLLMProviderName(Provider));
+	Obj->SetArrayField(TEXT("models"), ModelValues);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_LLMChat(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	if (!GEditor) { return ErrorResponse(TEXT("GEditor null.")); }
+
+	FString ProviderString;
+	FString Model;
+	FString SystemPrompt;
+	FString CustomEndpoint;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("provider"), ProviderString))
+	{
+		return ErrorResponse(TEXT("llm_chat requires 'provider'."));
+	}
+	if (!Args->TryGetStringField(TEXT("model"), Model))
+	{
+		return ErrorResponse(TEXT("llm_chat requires 'model'."));
+	}
+	Args->TryGetStringField(TEXT("system"), SystemPrompt);
+	Args->TryGetStringField(TEXT("custom_endpoint"), CustomEndpoint);
+
+	EAgentForgeLLMProvider Provider;
+	if (!ParseLLMProviderName(ProviderString, Provider))
+	{
+		return ErrorResponse(FString::Printf(TEXT("Unknown LLM provider: %s"), *ProviderString));
+	}
+
+	TArray<FAgentForgeChatMessage> Messages;
+	FString ParseError;
+	if (!ParseChatMessages(Args, Messages, ParseError))
+	{
+		return ErrorResponse(ParseError);
+	}
+
+	FAgentForgeLLMSettings Settings;
+	Settings.Provider = Provider;
+	Settings.Model = Model;
+	Settings.SystemPrompt = SystemPrompt;
+	Settings.Messages = Messages;
+	Settings.CustomEndpoint = CustomEndpoint;
+	if (Args->HasField(TEXT("max_tokens")))
+	{
+		Settings.MaxTokens = (int32)Args->GetNumberField(TEXT("max_tokens"));
+	}
+	if (Args->HasField(TEXT("temperature")))
+	{
+		Settings.Temperature = (float)Args->GetNumberField(TEXT("temperature"));
+	}
+
+	UAgentForgeLLMSubsystem* LLM = GEditor->GetEditorSubsystem<UAgentForgeLLMSubsystem>();
+	if (!LLM)
+	{
+		return ErrorResponse(TEXT("LLM subsystem unavailable."));
+	}
+
+	const FAgentForgeLLMResponse Response = LLM->SendChatRequestBlocking(Settings);
+	return ToJsonString(BuildLLMResponseObject(Response, Provider, Model));
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_LLMStructured(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	if (!GEditor) { return ErrorResponse(TEXT("GEditor null.")); }
+
+	FString ProviderString;
+	FString Model;
+	FString Prompt;
+	FString SystemPrompt;
+	FString CustomEndpoint;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("provider"), ProviderString))
+	{
+		return ErrorResponse(TEXT("llm_structured requires 'provider'."));
+	}
+	if (!Args->TryGetStringField(TEXT("model"), Model))
+	{
+		return ErrorResponse(TEXT("llm_structured requires 'model'."));
+	}
+	if (!Args->TryGetStringField(TEXT("prompt"), Prompt))
+	{
+		return ErrorResponse(TEXT("llm_structured requires 'prompt'."));
+	}
+	Args->TryGetStringField(TEXT("system"), SystemPrompt);
+	Args->TryGetStringField(TEXT("custom_endpoint"), CustomEndpoint);
+
+	EAgentForgeLLMProvider Provider;
+	if (!ParseLLMProviderName(ProviderString, Provider))
+	{
+		return ErrorResponse(FString::Printf(TEXT("Unknown LLM provider: %s"), *ProviderString));
+	}
+
+	FString SchemaString;
+	if (Args->HasTypedField<EJson::String>(TEXT("schema")))
+	{
+		SchemaString = Args->GetStringField(TEXT("schema"));
+	}
+	else
+	{
+		const TSharedPtr<FJsonObject>* SchemaObject = nullptr;
+		if (Args->TryGetObjectField(TEXT("schema"), SchemaObject) && SchemaObject && (*SchemaObject).IsValid())
+		{
+			SchemaString = ToJsonString(*SchemaObject);
+		}
+	}
+
+	if (SchemaString.IsEmpty())
+	{
+		return ErrorResponse(TEXT("llm_structured requires 'schema' as a JSON object or string."));
+	}
+
+	FAgentForgeLLMSettings Settings;
+	Settings.Provider = Provider;
+	Settings.Model = Model;
+	Settings.SystemPrompt = SystemPrompt;
+	Settings.CustomEndpoint = CustomEndpoint;
+	if (Args->HasField(TEXT("max_tokens")))
+	{
+		Settings.MaxTokens = (int32)Args->GetNumberField(TEXT("max_tokens"));
+	}
+	if (Args->HasField(TEXT("temperature")))
+	{
+		Settings.Temperature = (float)Args->GetNumberField(TEXT("temperature"));
+	}
+
+	UAgentForgeLLMSubsystem* LLM = GEditor->GetEditorSubsystem<UAgentForgeLLMSubsystem>();
+	if (!LLM)
+	{
+		return ErrorResponse(TEXT("LLM subsystem unavailable."));
+	}
+
+	const FAgentForgeLLMResponse Response = LLM->SendStructuredRequestBlocking(Prompt, SchemaString, Settings);
+	TSharedPtr<FJsonObject> Obj = BuildLLMResponseObject(Response, Provider, Model);
+
+	TSharedPtr<FJsonObject> StructuredObject;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Response.Content);
+	if (Response.bSuccess && FJsonSerializer::Deserialize(Reader, StructuredObject) && StructuredObject.IsValid())
+	{
+		Obj->SetObjectField(TEXT("structured"), StructuredObject);
+	}
+
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));

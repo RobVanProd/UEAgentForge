@@ -4,12 +4,17 @@
 
 UEAgentForge is structured as a single Editor-only UE5 module with three core classes and a transport layer.
 
-The current v0.5.0 foundation also includes Addendum A's first scene-building layer:
+The current v0.5.0 foundation includes these Addendum A and subsystem slices:
 
 - read-only asset discovery commands (`get_available_meshes`, `get_available_materials`)
 - viewport helpers used for deterministic screenshot capture (`set_viewport_camera`, `redraw_viewports`)
 - new mutating scene-dressing commands (`set_static_mesh`, `set_actor_scale`, `apply_material_to_actor`, `set_mesh_material_color`, `set_material_scalar_param`)
 - light spawning commands (`spawn_point_light`, `spawn_spot_light`)
+- expanded discovery and inspection commands (`get_available_blueprints`, `get_available_textures`, `get_available_sounds`, `get_asset_details`)
+- actor metadata/property controls (`duplicate_actor`, `set_actor_label`, `set_actor_mobility`, `set_actor_visibility`, `get_actor_property`, `set_actor_property`, `group_actors`)
+- compound building primitives (`create_wall`, `create_floor`, `create_room`, `create_corridor`, `create_pillar`)
+- a Python MCP server under `PythonClient/mcp_server/` that exposes the same command surface to external agent hosts
+- a UE-side LLM subsystem under `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/`
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -116,6 +121,8 @@ The `begin_transaction` / `end_transaction` commands allow the caller to group m
 **Phase 2 rollback test transaction:**
 A third temporary transaction is opened during Phase 2 specifically to test rollback. This transaction is always cancelled before the real one is opened. The rollback test lambda runs inside this cancelled transaction, and then again inside the real transaction.
 
+Some Unreal editor operations are not rollback-safe in this preflight pattern. Those commands are explicitly skip-listed and rely on Phase 1 plus the real transaction path instead. Actor spawning, duplication, grouping, compound primitive creation, and actor relabeling are examples.
+
 ## Singleton lifetime
 
 Both `UVerificationEngine::Get()` and `UConstitutionParser::Get()` use `AddToRoot()` to prevent garbage collection. They are initialized on first access and live for the entire editor session.
@@ -138,6 +145,11 @@ Source/UEAgentForge/
     └── ConstitutionParser.cpp     Markdown parser, keyword extraction
 ```
 
+Additional v0.5.0 frontier paths:
+
+- `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/` - provider interfaces, providers, and the editor LLM subsystem
+- `PythonClient/mcp_server/` - MCP server, host configs, and knowledge-base guidance
+
 ## Dependency map
 
 ```
@@ -159,6 +171,8 @@ UEAgentForge.Build.cs depends on:
 The root workflow docs (`AGENTS.md`, `CODEX.md`, `program.md`) now treat Unreal compilation and editor launch as standard validation actions, not optional side notes.
 
 The narrowest compile proof is `RunUAT BuildPlugin` against the detected UE 5.7 install. For editor smoke tests, the repo uses a temporary host project under `agent/tmp/RuntimeHostProject/` so command routing, plugin mounting, and headless editor startup can be proven without touching the user's live Unreal projects.
+
+Use `agent/tools/launch_runtime_host.ps1` for unattended scratch-host startup. It disables stale project and engine autosave restore state before waiting on `http://127.0.0.1:30010/remote/info`, which avoids the blocking Unreal `Restore Packages` modal discovered during live validation.
 
 ## Design principles
 

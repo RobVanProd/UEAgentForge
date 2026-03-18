@@ -98,6 +98,15 @@ The current execution order is:
 
 The workflow also explicitly allows Unreal validation through local tooling, including plugin compilation and launching the editor against a host project when a slice needs end-to-end proof.
 The root workflow docs include explicit `RunUAT BuildPlugin` and `UnrealEditor.exe` command patterns, plus the safe temporary host project path used for headless smoke tests.
+For unattended scratch-host launches, use `agent/tools/launch_runtime_host.ps1`; it disables stale Unreal autosave restore prompts before waiting for Remote Control to come online.
+
+## Current v0.5.0 Validated Slice
+
+The current repo state includes:
+
+- Addendum A scene-building batches through read-only asset discovery, material discovery/application, point/spot/rect/directional lights, actor duplication/label/visibility/mobility/property controls, viewport helpers, and compound primitives for walls, floors, rooms, corridors, and pillars.
+- A Python MCP server under `PythonClient/mcp_server/` that exposes the scene-building surface to external agent hosts.
+- A Phase 1 LLM subsystem under `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/`, with provider discovery and runtime key configuration validated against UE 5.7.
 
 Point your coding agent at `CODEX.md` or `program.md`, then have it work through the addendum and main plan on a dedicated implementation branch.
 
@@ -171,23 +180,43 @@ curl -X PUT http://127.0.0.1:30010/remote/object/call \
 | `get_actor_bounds` | AABB origin, extent, min, max |
 | `get_available_meshes` | Search Content Browser static meshes by keyword/path |
 | `get_available_materials` | Search materials and MICs by keyword/path |
+| `get_available_blueprints` | Search Blueprint assets by keyword/path/parent class |
+| `get_available_textures` | Search Texture2D assets by keyword/path |
+| `get_available_sounds` | Search SoundWave and SoundCue assets by keyword/path |
+| `get_asset_details` | Inspect supported asset metadata for meshes, materials, textures, sounds, and blueprints |
+| `get_actor_property` | Read an actor or component property via dot-path notation |
 
 ### Viewport & Capture
 | Command | Description |
 |---|---|
 | `set_viewport_camera` | Move the first perspective editor viewport camera |
 | `redraw_viewports` | Force a rendered frame before screenshot capture |
+| `focus_viewport_on_actor` | Frame the active perspective viewport on a target actor |
+| `get_viewport_info` | Read location, rotation, FOV, and size from the active perspective viewport |
 | `take_screenshot` | Capture viewport to PNG via the staging screenshot path |
 
 ### Actor Control
 | Command | Description |
 |---|---|
 | `spawn_actor` | Spawn actor by class path at transform |
+| `duplicate_actor` | Duplicate an actor with an optional world-space offset |
 | `spawn_point_light` | Spawn and configure a movable point light |
 | `spawn_spot_light` | Spawn and configure a movable spot light |
+| `spawn_rect_light` | Spawn and configure a movable rect light |
+| `spawn_directional_light` | Spawn and configure a movable directional light |
 | `set_actor_transform` | Move/rotate actor by object path |
 | `set_static_mesh` | Swap the mesh on an actor's static mesh component |
 | `set_actor_scale` | Set actor scale in XYZ |
+| `set_actor_label` | Rename an actor label in the editor |
+| `set_actor_mobility` | Set all scene components on an actor to Static, Stationary, or Movable |
+| `set_actor_visibility` | Toggle actor hidden state in the editor |
+| `group_actors` | Parent a set of actors under a named group/root actor |
+| `set_actor_property` | Write an actor or component property via dot-path notation |
+| `create_wall` | Spawn a scaled wall primitive between two points |
+| `create_floor` | Spawn a scaled floor primitive centered on an area |
+| `create_room` | Spawn a grouped room from floor plus four walls |
+| `create_corridor` | Spawn a grouped corridor from floor, walls, and optional ceiling |
+| `create_pillar` | Spawn a box or cylinder-based pillar primitive |
 | `delete_actor` | Delete actor by label |
 | `save_current_level` | Save the current map |
 

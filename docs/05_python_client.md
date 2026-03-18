@@ -56,6 +56,8 @@ result.error   # str or None — error message if any
 result.raw     # dict — full parsed JSON response
 ```
 
+`ForgeResult` normalizes both `error` and `error_message` response fields so UE-side failures surface consistently.
+
 ### `VerificationReport`
 
 ```python
@@ -110,6 +112,21 @@ else:
 client.spawn_point_light(180, 0, 220, intensity=3200, label="WallFill")
 ```
 
+## Scratch-host validation workflow
+
+For unattended live validation against the temporary host project, launch Unreal with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\agent\tools\launch_runtime_host.ps1 -StopExisting
+```
+
+Then connect normally from Python:
+
+```python
+client = AgentForgeClient(timeout=60.0, max_retries=6, retry_backoff_sec=1.0)
+assert client.wait_for_editor(timeout_sec=240.0, poll_sec=2.0)
+```
+
 ## All available methods
 
 ### Forge meta
@@ -129,11 +146,18 @@ client.assert_current_level(expected)      # dict
 client.get_actor_bounds(label)             # dict
 client.get_available_meshes(search_filter="", path_filter="", max_results=50)      # dict
 client.get_available_materials(search_filter="", path_filter="", max_results=50)   # dict
+client.get_available_blueprints(search_filter="", path_filter="", parent_class="", max_results=50)  # dict
+client.get_available_textures(search_filter="", path_filter="", max_results=50)    # dict
+client.get_available_sounds(search_filter="", path_filter="", max_results=50)      # dict
+client.get_asset_details(asset_path)       # dict
+client.get_actor_property(actor_name, property_name)  # dict
 ```
 
 ### Viewport & capture
 ```python
 client.set_viewport_camera(x=0, y=-600, z=300, pitch=-15, yaw=90, roll=0)  # ForgeResult
+client.focus_viewport_on_actor(actor_name)  # dict
+client.get_viewport_info()                # dict
 client.redraw_viewports()                # ForgeResult
 client.take_screenshot(filename)         # ForgeResult
 client.take_focused_screenshot(filename, x=None, y=None, z=None, pitch=None, yaw=None, roll=None)  # ForgeResult
@@ -142,11 +166,24 @@ client.take_focused_screenshot(filename, x=None, y=None, z=None, pitch=None, yaw
 ### Actor control
 ```python
 client.spawn_actor(class_path, x, y, z, pitch, yaw, roll)     # ForgeResult
+client.duplicate_actor(actor_name, offset_x=0.0, offset_y=0.0, offset_z=0.0)  # ForgeResult
 client.spawn_point_light(x, y, z, intensity=5000.0, color_r=1.0, color_g=1.0, color_b=1.0, attenuation_radius=1200.0, label="")  # ForgeResult
 client.spawn_spot_light(x, y, z, rx=0.0, ry=0.0, rz=0.0, intensity=5000.0, color_r=1.0, color_g=1.0, color_b=1.0, inner_cone_angle=15.0, outer_cone_angle=30.0, label="")  # ForgeResult
+client.spawn_rect_light(x, y, z, rx=0.0, ry=0.0, rz=0.0, intensity=5000.0, width=100.0, height=100.0, color_r=1.0, color_g=1.0, color_b=1.0, label="")  # ForgeResult
+client.spawn_directional_light(rx=-45.0, ry=0.0, rz=0.0, intensity=10.0, color_r=1.0, color_g=1.0, color_b=1.0, label="")  # ForgeResult
 client.set_actor_transform(object_path, x, y, z, pitch, yaw, roll)  # ForgeResult
 client.set_static_mesh(actor_name, mesh_path)  # ForgeResult
 client.set_actor_scale(actor_name, sx, sy, sz)  # ForgeResult
+client.set_actor_label(actor_name, new_label)  # ForgeResult
+client.set_actor_mobility(actor_name, mobility)  # ForgeResult
+client.set_actor_visibility(actor_name, visible)  # ForgeResult
+client.group_actors(actor_names, group_name)  # ForgeResult
+client.set_actor_property(actor_name, property_name, value)  # ForgeResult
+client.create_wall(start_x, start_y, end_x, end_y, z=0.0, height=300.0, thickness=20.0, material_path="", label="")  # ForgeResult
+client.create_floor(center_x, center_y, z=0.0, width=400.0, depth=400.0, thickness=10.0, material_path="", label="")  # ForgeResult
+client.create_room(center_x, center_y, z=0.0, width=400.0, depth=400.0, height=300.0, wall_thickness=20.0, floor_material="", wall_material="", label="")  # ForgeResult
+client.create_corridor(start_x, start_y, end_x, end_y, z=0.0, width=220.0, height=300.0, wall_thickness=20.0, include_ceiling=True, floor_material="", wall_material="", label="")  # ForgeResult
+client.create_pillar(x, y, z=0.0, radius=25.0, height=300.0, sides=16, material_path="", label="")  # ForgeResult
 client.delete_actor(label)                 # ForgeResult
 client.save_current_level()                # ForgeResult
 ```

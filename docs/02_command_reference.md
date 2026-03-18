@@ -313,6 +313,129 @@ Use this before `apply_material_to_actor` so agents select real project material
 
 ---
 
+### `get_available_blueprints`
+Search Blueprint assets by keyword, path, and optional parent class filter.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `search_filter` | string | no | `""` | Case-insensitive substring match against asset name |
+| `path_filter` | string | no | `""` | Package path filter |
+| `parent_class` | string | no | `""` | Parent class name hint, e.g. `Actor` |
+| `max_results` | int | no | `50` | Maximum number of matches returned |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "count": 1,
+  "assets": [
+    {
+      "asset_name": "BP_Sky_Sphere",
+      "asset_path": "/Engine/EngineSky/BP_Sky_Sphere.BP_Sky_Sphere",
+      "generated_class_path": "/Script/Engine.BlueprintGeneratedClass'/Engine/EngineSky/BP_Sky_Sphere.BP_Sky_Sphere_C'",
+      "parent_class_path": "/Script/CoreUObject.Class'/Script/Engine.Actor'"
+    }
+  ]
+}
+```
+
+---
+
+### `get_available_textures`
+Search `Texture2D` assets by keyword and/or folder path.
+
+**Args:** same shape as `get_available_meshes`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "count": 10,
+  "assets": [
+    {
+      "asset_name": "DefaultTexture",
+      "asset_path": "/Engine/EngineResources/DefaultTexture.DefaultTexture",
+      "package_path": "/Engine/EngineResources",
+      "class": "Texture2D"
+    }
+  ]
+}
+```
+
+---
+
+### `get_available_sounds`
+Search `SoundWave` and `SoundCue` assets by keyword and/or folder path.
+
+**Args:** same shape as `get_available_meshes`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "count": 2,
+  "assets": [
+    {
+      "asset_name": "1kSineTonePing",
+      "asset_path": "/Engine/EngineSounds/1kSineTonePing.1kSineTonePing",
+      "package_path": "/Engine/EngineSounds",
+      "class": "SoundWave"
+    }
+  ]
+}
+```
+
+---
+
+### `get_asset_details`
+Inspect supported asset metadata for meshes, materials, textures, sounds, and blueprints.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `asset_path` | string | yes | Full object path to the asset |
+
+**Response (mesh example):**
+```json
+{
+  "ok": true,
+  "asset_name": "Cube",
+  "asset_path": "/Engine/BasicShapes/Cube.Cube",
+  "class": "StaticMesh",
+  "package": "/Engine/BasicShapes/Cube",
+  "lod_count": 1,
+  "bounds_origin": { "x": 0, "y": 0, "z": 0 },
+  "bounds_extent": { "x": 50, "y": 50, "z": 50 }
+}
+```
+
+---
+
+### `get_actor_property`
+Read an actor or component property using dot-path notation.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `property_name` | string | yes | Property path, e.g. `LightComponent.Intensity` |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "HallFill",
+  "property_name": "LightComponent.Intensity",
+  "value": "2500.000000"
+}
+```
+
+---
+
 ## Viewport & Capture Commands
 
 ### `set_viewport_camera`
@@ -359,6 +482,47 @@ Call this immediately before `take_screenshot` when the editor may be idle.
 
 ---
 
+### `focus_viewport_on_actor`
+Frame the active perspective editor viewport on a target actor.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Batch2_Corridor",
+  "actor_object_path": "/Temp/Untitled_1.Untitled_1:PersistentLevel.Actor_0"
+}
+```
+
+---
+
+### `get_viewport_info`
+Read transform and render dimensions from the active perspective editor viewport.
+
+**Args:** none
+
+**Response:**
+```json
+{
+  "ok": true,
+  "location": { "x": 75201.9, "y": 85553.0, "z": 44621.0 },
+  "pitch": -24.2,
+  "yaw": -854.4,
+  "roll": 0.0,
+  "fov": 90.0,
+  "width": 1315,
+  "height": 379
+}
+```
+
+---
+
 ## Actor Control Commands
 
 All actor control commands are **mutating** and run through the full verification + transaction pipeline.
@@ -381,6 +545,31 @@ Spawn a new actor of a given class at a world transform.
 **Response:**
 ```json
 { "spawned_name": "StaticMeshActor_3", "spawned_object_path": "..." }
+```
+
+---
+
+### `duplicate_actor`
+Duplicate an existing actor and optionally offset the duplicate in world space.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `actor_name` | string | yes | — | Source actor label or name |
+| `offset_x` | float | no | `0` | World-space X offset |
+| `offset_y` | float | no | `0` | World-space Y offset |
+| `offset_z` | float | no | `0` | World-space Z offset |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "source_actor": "Wall_A",
+  "actor_name": "Wall_A2",
+  "actor_object_path": "/Game/Maps/Test.Test:PersistentLevel.StaticMeshActor_12",
+  "location": { "x": 200, "y": 0, "z": 0 }
+}
 ```
 
 ---
@@ -436,6 +625,57 @@ Spawn a movable `SpotLight` actor with transform, color, and cone angles.
   "spawned_name": "SpotLight_1",
   "spawned_object_path": "...",
   "label": "DoorAccent"
+}
+```
+
+---
+
+### `spawn_rect_light`
+Spawn a movable `RectLight` actor with source dimensions and intensity.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `x`, `y`, `z` | float | no | `0/0/0` | World position |
+| `rx`, `ry`, `rz` | float | no | `0/0/0` | Rotation |
+| `width` | float | no | `100` | Source width in cm |
+| `height` | float | no | `100` | Source height in cm |
+| `intensity` | float | no | `5000` | Light intensity |
+| `color_r`, `color_g`, `color_b` | float | no | `1/1/1` | RGB light color |
+| `label` | string | no | `""` | Optional actor label |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "spawned_name": "RectLight_1",
+  "spawned_object_path": "...",
+  "label": "WindowFill"
+}
+```
+
+---
+
+### `spawn_directional_light`
+Spawn a movable `DirectionalLight` actor with rotation and intensity.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `rx`, `ry`, `rz` | float | no | `-45/0/0` | Rotation |
+| `intensity` | float | no | `10` | Light intensity |
+| `color_r`, `color_g`, `color_b` | float | no | `1/1/1` | RGB light color |
+| `label` | string | no | `""` | Optional actor label |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "spawned_name": "DirectionalLight_0",
+  "spawned_object_path": "...",
+  "label": "MainSun"
 }
 ```
 
@@ -503,6 +743,116 @@ Set an actor's world scale. Missing axis fields keep the current value.
 
 ---
 
+### `set_actor_label`
+Rename an actor label in the editor.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `new_label` | string | yes | New editor label |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "HallWall_A",
+  "actor_object_path": "/Game/Maps/Test.Test:PersistentLevel.StaticMeshActor_4"
+}
+```
+
+---
+
+### `set_actor_mobility`
+Set every scene component on an actor to `Static`, `Stationary`, or `Movable`.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `mobility` | string | yes | `Static`, `Stationary`, or `Movable` |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "HallWall_A",
+  "mobility": "Movable"
+}
+```
+
+---
+
+### `set_actor_visibility`
+Toggle whether an actor is visible in the editor and game.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `visible` | bool | yes | Desired visibility |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "HallWall_A",
+  "visible": false
+}
+```
+
+---
+
+### `group_actors`
+Parent a set of existing actors under a named root actor for compound layout control.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_names` | array<string> | yes | Labels or names of the actors to group |
+| `group_name` | string | yes | Label for the spawned root/group actor |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "group_name": "HallSegment_A",
+  "group_object_path": "/Game/Maps/Test.Test:PersistentLevel.Actor_2",
+  "children": [
+    { "label": "HallWall_A", "object_path": "..." }
+  ]
+}
+```
+
+---
+
+### `set_actor_property`
+Write an actor or component property using dot-path notation.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `property_name` | string | yes | Property path, e.g. `LightComponent.Intensity` |
+| `value` | string | yes | Unreal text-import value |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "HallFill",
+  "property_name": "LightComponent.Intensity",
+  "value": "2500.000000"
+}
+```
+
+---
+
 ### `delete_actor`
 Delete an actor from the level by label.
 
@@ -527,6 +877,73 @@ Save the currently open level to disk.
 **Response:**
 ```json
 { "ok": true, "detail": "Level saved." }
+```
+
+---
+
+## Scene Construction Commands
+
+These compound tools build scaled primitive geometry using engine fallback meshes and optional material assignment.
+
+### `create_wall`
+Spawn a wall segment between two world points.
+
+**Key args:** `start_x`, `start_y`, `end_x`, `end_y`, `z`, `height`, `thickness`, `material_path`, `label`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "HallWall_A",
+  "actor_object_path": "...",
+  "length": 600.0,
+  "height": 300.0,
+  "thickness": 20.0
+}
+```
+
+---
+
+### `create_floor`
+Spawn a floor slab centered on a rectangle.
+
+**Key args:** `center_x`, `center_y`, `z`, `width`, `depth`, `thickness`, `material_path`, `label`
+
+---
+
+### `create_room`
+Spawn a grouped room from a floor and four walls.
+
+**Key args:** `center_x`, `center_y`, `z`, `width`, `depth`, `height`, `wall_thickness`, `floor_material`, `wall_material`, `label`
+
+**Response shape:** returns `group_name`, `group_object_path`, `child_count`, and `children[]`.
+
+---
+
+### `create_corridor`
+Spawn a grouped corridor from floor, two walls, and optional ceiling.
+
+**Key args:** `start_x`, `start_y`, `end_x`, `end_y`, `z`, `width`, `height`, `wall_thickness`, `include_ceiling`, `floor_material`, `wall_material`, `label`
+
+**Response shape:** returns `group_name`, `group_object_path`, `child_count`, and `children[]`.
+
+---
+
+### `create_pillar`
+Spawn a pillar primitive. Box mode is used for low side counts, cylinder mode for round pillars.
+
+**Key args:** `x`, `y`, `z`, `radius`, `height`, `sides`, `material_path`, `label`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Pillar_A",
+  "actor_object_path": "...",
+  "radius": 25.0,
+  "height": 300.0,
+  "sides": 16
+}
 ```
 
 ---

@@ -10,6 +10,7 @@
 UENUM(BlueprintType)
 enum class EVerificationPhase : uint8
 {
+	None        = 0x00 UMETA(Hidden),
 	PreFlight   = 0x01,  // Validate constitution, capture pre-state
 	Snapshot    = 0x02,  // Auto-snapshot + rollback test (error injection)
 	PostVerify  = 0x04,  // Verify expected state changes occurred
@@ -25,10 +26,10 @@ struct UEAGENTFORGE_API FVerificationPhaseResult
 {
 	GENERATED_BODY()
 
-	UPROPERTY(BlueprintReadOnly) FString  PhaseName;
-	UPROPERTY(BlueprintReadOnly) bool     Passed = false;
-	UPROPERTY(BlueprintReadOnly) FString  Detail;
-	UPROPERTY(BlueprintReadOnly) float    DurationMs = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Verification") FString  PhaseName;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Verification") bool     Passed = false;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Verification") FString  Detail;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Verification") float    DurationMs = 0.f;
 };
 
 /**

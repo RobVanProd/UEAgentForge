@@ -183,6 +183,30 @@ class AgentForgeClient:
     def get_actor_bounds(self, label: str) -> Dict:
         return self._send("get_actor_bounds", {"label": label})
 
+    def get_available_meshes(
+        self,
+        search_filter: str = "",
+        path_filter: str = "",
+        max_results: int = 50,
+    ) -> Dict:
+        return self._send("get_available_meshes", {
+            "search_filter": search_filter,
+            "path_filter": path_filter,
+            "max_results": max_results,
+        })
+
+    def get_available_materials(
+        self,
+        search_filter: str = "",
+        path_filter: str = "",
+        max_results: int = 50,
+    ) -> Dict:
+        return self._send("get_available_materials", {
+            "search_filter": search_filter,
+            "path_filter": path_filter,
+            "max_results": max_results,
+        })
+
     # ── Actor control ──────────────────────────────────────────────────────
     def spawn_actor(
         self,
@@ -214,11 +238,81 @@ class AgentForgeClient:
             "pitch": pitch, "yaw": yaw, "roll": roll,
         })
 
+    def set_static_mesh(self, actor_name: str, mesh_path: str) -> ForgeResult:
+        return self.execute("set_static_mesh", {
+            "actor_name": actor_name,
+            "mesh_path": mesh_path,
+        })
+
+    def set_actor_scale(self, actor_name: str, sx: float, sy: float, sz: float) -> ForgeResult:
+        return self.execute("set_actor_scale", {
+            "actor_name": actor_name,
+            "sx": sx,
+            "sy": sy,
+            "sz": sz,
+        })
+
     def delete_actor(self, label: str) -> ForgeResult:
         return self.execute("delete_actor", {"label": label})
 
     def save_current_level(self) -> ForgeResult:
         return self.execute("save_current_level")
+
+    def spawn_point_light(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        intensity: float = 5000.0,
+        color_r: float = 1.0,
+        color_g: float = 1.0,
+        color_b: float = 1.0,
+        attenuation_radius: float = 1200.0,
+        label: str = "",
+    ) -> ForgeResult:
+        return self.execute("spawn_point_light", {
+            "x": x,
+            "y": y,
+            "z": z,
+            "intensity": intensity,
+            "color_r": color_r,
+            "color_g": color_g,
+            "color_b": color_b,
+            "attenuation_radius": attenuation_radius,
+            "label": label,
+        })
+
+    def spawn_spot_light(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        rx: float = 0.0,
+        ry: float = 0.0,
+        rz: float = 0.0,
+        intensity: float = 5000.0,
+        color_r: float = 1.0,
+        color_g: float = 1.0,
+        color_b: float = 1.0,
+        inner_cone_angle: float = 15.0,
+        outer_cone_angle: float = 30.0,
+        label: str = "",
+    ) -> ForgeResult:
+        return self.execute("spawn_spot_light", {
+            "x": x,
+            "y": y,
+            "z": z,
+            "rx": rx,
+            "ry": ry,
+            "rz": rz,
+            "intensity": intensity,
+            "color_r": color_r,
+            "color_g": color_g,
+            "color_b": color_b,
+            "inner_cone_angle": inner_cone_angle,
+            "outer_cone_angle": outer_cone_angle,
+            "label": label,
+        })
 
     def take_screenshot(self, filename: str = "forge_screenshot") -> ForgeResult:
         return self.execute("take_screenshot", {"filename": filename})
@@ -364,6 +458,50 @@ class AgentForgeClient:
         if scalar_params: args["scalar_params"] = scalar_params
         if vector_params:  args["vector_params"] = vector_params
         return self.execute("set_material_params", args)
+
+    def apply_material_to_actor(
+        self,
+        actor_name: str,
+        material_path: str,
+        slot_index: int = 0,
+    ) -> ForgeResult:
+        return self.execute("apply_material_to_actor", {
+            "actor_name": actor_name,
+            "material_path": material_path,
+            "slot_index": slot_index,
+        })
+
+    def set_mesh_material_color(
+        self,
+        actor_name: str,
+        r: float,
+        g: float,
+        b: float,
+        a: float = 1.0,
+        slot_index: int = 0,
+    ) -> ForgeResult:
+        return self.execute("set_mesh_material_color", {
+            "actor_name": actor_name,
+            "r": r,
+            "g": g,
+            "b": b,
+            "a": a,
+            "slot_index": slot_index,
+        })
+
+    def set_material_scalar_param(
+        self,
+        actor_name: str,
+        param_name: str,
+        value: float,
+        slot_index: int = 0,
+    ) -> ForgeResult:
+        return self.execute("set_material_scalar_param", {
+            "actor_name": actor_name,
+            "param_name": param_name,
+            "value": value,
+            "slot_index": slot_index,
+        })
 
     # ── Content management ─────────────────────────────────────────────────
     def rename_asset(self, asset_path: str, new_name: str) -> ForgeResult:

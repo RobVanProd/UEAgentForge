@@ -86,6 +86,30 @@ with client.transaction("Spawn Platform"):
 # Both actors land atomically, or both are undone on exception
 ```
 
+## Rapid scene-dressing example
+
+```python
+from ueagentforge_client import AgentForgeClient
+
+client = AgentForgeClient()
+
+meshes = client.get_available_meshes(search_filter="wall", path_filter="/Game/Environment")
+materials = client.get_available_materials(search_filter="concrete", path_filter="/Game/Materials")
+
+wall = client.spawn_actor("/Script/Engine.StaticMeshActor", x=0, y=0, z=0)
+wall_name = wall.raw["spawned_name"]
+
+client.set_static_mesh(wall_name, meshes["assets"][0]["asset_path"])
+client.set_actor_scale(wall_name, 4.0, 0.25, 3.0)
+
+if materials["assets"]:
+    client.apply_material_to_actor(wall_name, materials["assets"][0]["asset_path"])
+else:
+    client.set_mesh_material_color(wall_name, 0.18, 0.20, 0.22)
+
+client.spawn_point_light(180, 0, 220, intensity=3200, label="WallFill")
+```
+
 ## All available methods
 
 ### Forge meta
@@ -103,15 +127,28 @@ client.get_actor_components(label)         # list[dict]
 client.get_current_level()                 # dict
 client.assert_current_level(expected)      # dict
 client.get_actor_bounds(label)             # dict
+client.get_available_meshes(search_filter="", path_filter="", max_results=50)      # dict
+client.get_available_materials(search_filter="", path_filter="", max_results=50)   # dict
+```
+
+### Viewport & capture
+```python
+client.set_viewport_camera(x=0, y=-600, z=300, pitch=-15, yaw=90, roll=0)  # ForgeResult
+client.redraw_viewports()                # ForgeResult
+client.take_screenshot(filename)         # ForgeResult
+client.take_focused_screenshot(filename, x=None, y=None, z=None, pitch=None, yaw=None, roll=None)  # ForgeResult
 ```
 
 ### Actor control
 ```python
 client.spawn_actor(class_path, x, y, z, pitch, yaw, roll)     # ForgeResult
+client.spawn_point_light(x, y, z, intensity=5000.0, color_r=1.0, color_g=1.0, color_b=1.0, attenuation_radius=1200.0, label="")  # ForgeResult
+client.spawn_spot_light(x, y, z, rx=0.0, ry=0.0, rz=0.0, intensity=5000.0, color_r=1.0, color_g=1.0, color_b=1.0, inner_cone_angle=15.0, outer_cone_angle=30.0, label="")  # ForgeResult
 client.set_actor_transform(object_path, x, y, z, pitch, yaw, roll)  # ForgeResult
+client.set_static_mesh(actor_name, mesh_path)  # ForgeResult
+client.set_actor_scale(actor_name, sx, sy, sz)  # ForgeResult
 client.delete_actor(label)                 # ForgeResult
 client.save_current_level()                # ForgeResult
-client.take_screenshot(filename)           # ForgeResult
 ```
 
 ### Spatial queries
@@ -132,6 +169,9 @@ client.edit_blueprint_node(bp_path, node_type, node_title, pins)  # ForgeResult
 ```python
 client.create_material_instance(parent, name, output_path)  # ForgeResult
 client.set_material_params(instance_path, scalar_params, vector_params)  # ForgeResult
+client.apply_material_to_actor(actor_name, material_path, slot_index=0)  # ForgeResult
+client.set_mesh_material_color(actor_name, r, g, b, a=1.0, slot_index=0)  # ForgeResult
+client.set_material_scalar_param(actor_name, param_name, value, slot_index=0)  # ForgeResult
 client.rename_asset(asset_path, new_name)   # ForgeResult
 client.move_asset(asset_path, dest_path)    # ForgeResult
 client.delete_asset(asset_path)             # ForgeResult
@@ -229,3 +269,5 @@ python 03_verified_workflow.py
 ```
 
 All examples connect to `127.0.0.1:30010` by default. Make sure the Unreal Editor is open with a level loaded.
+
+Screenshot helper methods stage captures to `C:/HGShots/`. `take_focused_screenshot()` forces a viewport redraw before capture so unattended editor sessions still produce a rendered frame.

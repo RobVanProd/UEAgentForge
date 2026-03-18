@@ -16,6 +16,7 @@ public class UEAgentForge : ModuleRules
 			"Engine",
 			"UnrealEd",
 			"EditorSubsystem",
+			"LevelEditor",
 
 			// JSON transport (Remote Control API payload format)
 			"Json",

@@ -4,6 +4,13 @@
 
 UEAgentForge is structured as a single Editor-only UE5 module with three core classes and a transport layer.
 
+The current v0.5.0 foundation also includes Addendum A's first scene-building layer:
+
+- read-only asset discovery commands (`get_available_meshes`, `get_available_materials`)
+- viewport helpers used for deterministic screenshot capture (`set_viewport_camera`, `redraw_viewports`)
+- new mutating scene-dressing commands (`set_static_mesh`, `set_actor_scale`, `apply_material_to_actor`, `set_mesh_material_color`, `set_material_scalar_param`)
+- light spawning commands (`spawn_point_light`, `spawn_spot_light`)
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         UEAgentForge Plugin                         │
@@ -59,6 +66,8 @@ Key design decisions:
 - **All static** — BlueprintFunctionLibrary pattern; no instance state
 - **Routing table** — `ExecuteCommandJson` dispatches `cmd` strings to private handlers
 - **Mutating/read split** — `IsMutatingCommand()` determines whether the command goes through `ExecuteSafeTransaction` or routes directly
+- **Asset discovery stays read-only** — Content Browser search commands use direct routing because they cannot mutate editor state
+- **Scene dressing stays inside safety rails** — mesh swaps, scale changes, material application, and light spawning all use the existing rollback-capable transaction path
 - **Shared utilities** — `ParseJsonObject`, `ToJsonString`, `ErrorResponse`, `OkResponse`, `FindActorByLabelOrName`, `VecToJson` used by all handlers
 
 ### `UVerificationEngine`
@@ -137,12 +146,19 @@ UEAgentForge.Build.cs depends on:
   Json, JsonUtilities                                      ← command transport
   AssetRegistry, AssetTools, ObjectTools                   ← content management
   ImageWrapper, RenderCore, Renderer                       ← screenshots
+  LevelEditor                                              ← viewport camera control and redraw
   Kismet, KismetCompiler, BlueprintGraph                   ← BP manipulation
   BlueprintEditorLibrary, GraphEditor                      ← BP graph editing
   NavigationSystem                                         ← navmesh queries
   RHI                                                      ← GPU perf stats
   PythonScriptPlugin                                       ← execute_python
 ```
+
+## Validation harness
+
+The root workflow docs (`AGENTS.md`, `CODEX.md`, `program.md`) now treat Unreal compilation and editor launch as standard validation actions, not optional side notes.
+
+The narrowest compile proof is `RunUAT BuildPlugin` against the detected UE 5.7 install. For editor smoke tests, the repo uses a temporary host project under `agent/tmp/RuntimeHostProject/` so command routing, plugin mounting, and headless editor startup can be proven without touching the user's live Unreal projects.
 
 ## Design principles
 

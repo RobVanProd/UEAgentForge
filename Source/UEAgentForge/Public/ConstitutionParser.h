@@ -13,19 +13,19 @@ struct UEAGENTFORGE_API FConstitutionRule
 	GENERATED_BODY()
 
 	/** Short identifier, e.g. "NO_SOURCE_EDITS" */
-	UPROPERTY(BlueprintReadOnly) FString RuleId;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Constitution") FString RuleId;
 
 	/** Human-readable description extracted from the markdown. */
-	UPROPERTY(BlueprintReadOnly) FString Description;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Constitution") FString Description;
 
 	/**
 	 * Keywords that trigger this rule when found in an action description.
 	 * Example: {"Oceanology", "plugin source", "modify source"}
 	 */
-	UPROPERTY(BlueprintReadOnly) TArray<FString> TriggerKeywords;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Constitution") TArray<FString> TriggerKeywords;
 
 	/** Whether violating this rule hard-blocks the action (true) or just warns (false). */
-	UPROPERTY(BlueprintReadOnly) bool bIsBlocking = true;
+	UPROPERTY(BlueprintReadOnly, Category = "AgentForge|Constitution") bool bIsBlocking = true;
 };
 
 /**

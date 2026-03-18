@@ -21,5 +21,11 @@
 			"LoadingPhase": "Default"
 		}
 	],
+	"Plugins": [
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		}
+	],
 	"EnabledByDefault": true
 }

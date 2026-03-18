@@ -3,7 +3,7 @@
 | # | Document | Description |
 |---|---|---|
 | 1 | [Getting Started](01_getting_started.md) | Installation, first commands, prerequisites |
-| 2 | [Command Reference](02_command_reference.md) | All 30+ commands with args and response format |
+| 2 | [Command Reference](02_command_reference.md) | All 40+ commands with args and response format |
 | 3 | [Verification Protocol](03_verification_protocol.md) | 4-phase safety system deep-dive |
 | 4 | [Constitution System](04_constitution_system.md) | Markdown-based governance rules |
 | 5 | [Python Client](05_python_client.md) | Client API, context managers, all methods |
@@ -19,3 +19,11 @@
 - [Report an Issue](https://github.com/RobVanProd/UEAgentForge/issues)
 - [Full Command List](02_command_reference.md)
 - [Python Client API](05_python_client.md)
+
+## Root workflow docs
+
+- [AGENTS.md](../AGENTS.md)
+- [CODEX.md](../CODEX.md)
+- [program.md](../program.md)
+- [agent/review_inbox.md](../agent/review_inbox.md)
+- [PythonClient/mcp_server/knowledge_base/building_guide.md](../PythonClient/mcp_server/knowledge_base/building_guide.md)

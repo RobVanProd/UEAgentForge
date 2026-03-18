@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ueagentforge": {
+      "command": "python",
+      "args": [
+        "C:/Users/Rob/Documents/Unreal Projects/UEAgentForge/PythonClient/mcp_server/agentforge_mcp_server.py"
+      ],
+      "env": {
+        "UEAGENTFORGE_HOST": "127.0.0.1",
+        "UEAGENTFORGE_PORT": "30010",
+        "UEAGENTFORGE_TIMEOUT": "60"
+      }
+    }
+  }
+}

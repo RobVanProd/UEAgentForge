@@ -50,7 +50,7 @@ class ForgeResult:
 
     @classmethod
     def from_response(cls, data: Dict[str, Any]) -> "ForgeResult":
-        error = data.get("error")
+        error = data.get("error") or data.get("error_message")
         ok = error is None and data.get("ok", True)
         return cls(raw=data, ok=ok, error=error)
 
@@ -286,6 +286,53 @@ class AgentForgeClient:
             "search_filter": search_filter,
             "path_filter": path_filter,
             "max_results": max_results,
+        })
+
+    def get_available_blueprints(
+        self,
+        search_filter: str = "",
+        parent_class: str = "",
+        path_filter: str = "",
+        max_results: int = 50,
+    ) -> Dict:
+        return self._send("get_available_blueprints", {
+            "search_filter": search_filter,
+            "parent_class": parent_class,
+            "path_filter": path_filter,
+            "max_results": max_results,
+        })
+
+    def get_available_textures(
+        self,
+        search_filter: str = "",
+        path_filter: str = "",
+        max_results: int = 50,
+    ) -> Dict:
+        return self._send("get_available_textures", {
+            "search_filter": search_filter,
+            "path_filter": path_filter,
+            "max_results": max_results,
+        })
+
+    def get_available_sounds(
+        self,
+        search_filter: str = "",
+        path_filter: str = "",
+        max_results: int = 50,
+    ) -> Dict:
+        return self._send("get_available_sounds", {
+            "search_filter": search_filter,
+            "path_filter": path_filter,
+            "max_results": max_results,
+        })
+
+    def get_asset_details(self, asset_path: str) -> Dict:
+        return self._send("get_asset_details", {"asset_path": asset_path})
+
+    def get_actor_property(self, actor_name: str, property_name: str) -> Dict:
+        return self._send("get_actor_property", {
+            "actor_name": actor_name,
+            "property_name": property_name,
         })
 
     def analyze_level_composition(self) -> Dict:
@@ -870,6 +917,20 @@ class AgentForgeClient:
             "pitch": pitch, "yaw": yaw, "roll": roll,
         })
 
+    def duplicate_actor(
+        self,
+        actor_name: str,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0,
+        offset_z: float = 0.0,
+    ) -> ForgeResult:
+        return self.execute("duplicate_actor", {
+            "actor_name": actor_name,
+            "offset_x": offset_x,
+            "offset_y": offset_y,
+            "offset_z": offset_z,
+        })
+
     def set_actor_transform(
         self,
         object_path: str,
@@ -894,6 +955,177 @@ class AgentForgeClient:
             "sx": sx,
             "sy": sy,
             "sz": sz,
+        })
+
+    def set_actor_label(self, actor_name: str, new_label: str) -> ForgeResult:
+        return self.execute("set_actor_label", {
+            "actor_name": actor_name,
+            "new_label": new_label,
+        })
+
+    def set_actor_mobility(self, actor_name: str, mobility: str) -> ForgeResult:
+        return self.execute("set_actor_mobility", {
+            "actor_name": actor_name,
+            "mobility": mobility,
+        })
+
+    def set_actor_visibility(self, actor_name: str, visible: bool) -> ForgeResult:
+        return self.execute("set_actor_visibility", {
+            "actor_name": actor_name,
+            "visible": visible,
+        })
+
+    def group_actors(self, actor_names: List[str], group_name: str) -> ForgeResult:
+        return self.execute("group_actors", {
+            "actor_names": actor_names,
+            "group_name": group_name,
+        })
+
+    def set_actor_property(self, actor_name: str, property_name: str, value: str) -> ForgeResult:
+        return self.execute("set_actor_property", {
+            "actor_name": actor_name,
+            "property_name": property_name,
+            "value": value,
+        })
+
+    def create_wall(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        height: float = 300.0,
+        thickness: float = 20.0,
+        material_path: str = "",
+        has_windows: bool = False,
+        window_spacing: float = 220.0,
+        window_height: float = 120.0,
+        label: str = "Wall",
+        z: float = 0.0,
+    ) -> ForgeResult:
+        return self.execute("create_wall", {
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+            "height": height,
+            "thickness": thickness,
+            "material_path": material_path,
+            "has_windows": has_windows,
+            "window_spacing": window_spacing,
+            "window_height": window_height,
+            "label": label,
+            "z": z,
+        })
+
+    def create_floor(
+        self,
+        center_x: float,
+        center_y: float,
+        z: float,
+        width: float,
+        length: float,
+        material_path: str = "",
+        label: str = "Floor",
+        thickness: float = 10.0,
+    ) -> ForgeResult:
+        return self.execute("create_floor", {
+            "center_x": center_x,
+            "center_y": center_y,
+            "z": z,
+            "width": width,
+            "length": length,
+            "material_path": material_path,
+            "label": label,
+            "thickness": thickness,
+        })
+
+    def create_room(
+        self,
+        center_x: float,
+        center_y: float,
+        z: float,
+        width: float,
+        length: float,
+        height: float = 300.0,
+        wall_thickness: float = 20.0,
+        floor_material: str = "",
+        wall_material: str = "",
+        ceiling_material: str = "",
+        door_wall: str = "",
+        window_walls: Optional[List[str]] = None,
+        label: str = "Room",
+        slab_thickness: float = 10.0,
+    ) -> ForgeResult:
+        return self.execute("create_room", {
+            "center_x": center_x,
+            "center_y": center_y,
+            "z": z,
+            "width": width,
+            "length": length,
+            "height": height,
+            "wall_thickness": wall_thickness,
+            "floor_material": floor_material,
+            "wall_material": wall_material,
+            "ceiling_material": ceiling_material,
+            "door_wall": door_wall,
+            "window_walls": window_walls or [],
+            "label": label,
+            "slab_thickness": slab_thickness,
+        })
+
+    def create_corridor(
+        self,
+        start_x: float,
+        start_y: float,
+        end_x: float,
+        end_y: float,
+        width: float,
+        height: float = 300.0,
+        wall_material: str = "",
+        floor_material: str = "",
+        has_ceiling: bool = True,
+        label: str = "Corridor",
+        z: float = 0.0,
+        wall_thickness: float = 20.0,
+        slab_thickness: float = 10.0,
+    ) -> ForgeResult:
+        return self.execute("create_corridor", {
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+            "width": width,
+            "height": height,
+            "wall_material": wall_material,
+            "floor_material": floor_material,
+            "has_ceiling": has_ceiling,
+            "label": label,
+            "z": z,
+            "wall_thickness": wall_thickness,
+            "slab_thickness": slab_thickness,
+        })
+
+    def create_pillar(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        radius: float,
+        height: float,
+        sides: int = 16,
+        material_path: str = "",
+        label: str = "Pillar",
+    ) -> ForgeResult:
+        return self.execute("create_pillar", {
+            "x": x,
+            "y": y,
+            "z": z,
+            "radius": radius,
+            "height": height,
+            "sides": sides,
+            "material_path": material_path,
+            "label": label,
         })
 
     def delete_actor(self, label: str) -> ForgeResult:
@@ -958,12 +1190,72 @@ class AgentForgeClient:
             "label": label,
         })
 
+    def spawn_rect_light(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        rx: float = 0.0,
+        ry: float = 0.0,
+        rz: float = 0.0,
+        intensity: float = 5000.0,
+        width: float = 100.0,
+        height: float = 100.0,
+        color_r: float = 1.0,
+        color_g: float = 1.0,
+        color_b: float = 1.0,
+        label: str = "",
+    ) -> ForgeResult:
+        return self.execute("spawn_rect_light", {
+            "x": x,
+            "y": y,
+            "z": z,
+            "rx": rx,
+            "ry": ry,
+            "rz": rz,
+            "intensity": intensity,
+            "width": width,
+            "height": height,
+            "color_r": color_r,
+            "color_g": color_g,
+            "color_b": color_b,
+            "label": label,
+        })
+
+    def spawn_directional_light(
+        self,
+        rx: float = -45.0,
+        ry: float = 0.0,
+        rz: float = 0.0,
+        intensity: float = 10.0,
+        color_r: float = 1.0,
+        color_g: float = 1.0,
+        color_b: float = 1.0,
+        label: str = "",
+    ) -> ForgeResult:
+        return self.execute("spawn_directional_light", {
+            "rx": rx,
+            "ry": ry,
+            "rz": rz,
+            "intensity": intensity,
+            "color_r": color_r,
+            "color_g": color_g,
+            "color_b": color_b,
+            "label": label,
+        })
+
     def take_screenshot(self, filename: str = "forge_screenshot") -> ForgeResult:
         return self.execute("take_screenshot", {"filename": filename})
 
     def redraw_viewports(self) -> ForgeResult:
         """Force editor viewport redraw before screenshot capture."""
         return self.execute("redraw_viewports")
+
+    def focus_viewport_on_actor(self, actor_name: str) -> Dict[str, Any]:
+        return self._send("focus_viewport_on_actor", {"actor_name": actor_name})
+
+    def get_viewport_info(self) -> Dict[str, Any]:
+        return self._send("get_viewport_info")
 
     def set_viewport_camera(
         self,
@@ -1167,6 +1459,57 @@ unreal.EditorAssetLibrary.save_asset(asset_path)
             "description": description,
             "max_iterations": int(max_iterations),
             "score_target": float(score_target),
+        })
+
+    def llm_set_key(self, provider: str, key: str) -> ForgeResult:
+        return self.execute("llm_set_key", {
+            "provider": provider,
+            "key": key,
+        })
+
+    def llm_get_models(self, provider: str) -> Dict[str, Any]:
+        return self._send("llm_get_models", {"provider": provider})
+
+    def llm_chat(
+        self,
+        provider: str,
+        model: str,
+        messages: List[Dict[str, Any]],
+        system: str = "",
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.execute("llm_chat", {
+            "provider": provider,
+            "model": model,
+            "messages": messages,
+            "system": system,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "custom_endpoint": custom_endpoint,
+        })
+
+    def llm_structured(
+        self,
+        provider: str,
+        model: str,
+        prompt: str,
+        schema: Dict[str, Any],
+        system: str = "",
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.execute("llm_structured", {
+            "provider": provider,
+            "model": model,
+            "prompt": prompt,
+            "schema": schema,
+            "system": system,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "custom_endpoint": custom_endpoint,
         })
 
     # â”€â”€ Material instancing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

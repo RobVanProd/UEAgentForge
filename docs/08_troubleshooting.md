@@ -13,6 +13,20 @@
 4. Check Windows Firewall — allow port 30010 for local connections
 5. Try: `curl http://127.0.0.1:30010/remote/info` — should return JSON
 
+### Unreal opens `Restore Packages` and Remote Control never starts
+
+**Cause:** Unreal is blocked behind an autosave recovery modal, so the editor never finishes booting into a Remote Control-ready state.
+
+**Fixes:**
+1. Prefer the tracked launch helper:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\agent\tools\launch_runtime_host.ps1 -StopExisting
+   ```
+2. If launching manually, clear the scratch-host restore state:
+   - `{ProjectDir}\Saved\Autosaves`
+   - `%LOCALAPPDATA%\UnrealEngine\5.7\Saved\Autosaves\PackageRestoreData.json`
+3. Relaunch the editor and retry `curl http://127.0.0.1:30010/remote/info`
+
 ### `{"error": "UEAgentForge requires WITH_EDITOR."}`
 
 **Cause:** You are calling the plugin in a non-editor build (Game or Server target).

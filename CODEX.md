@@ -23,6 +23,7 @@ Operating rules:
 - Use `agent/results.tsv` and `agent/logs/` for runtime artifacts, not git history.
 - Protect existing command behavior, transaction safety, rollback verification, and constitution enforcement.
 - You are allowed to compile the plugin and launch Unreal Editor for validation using the paths documented in `AGENTS.md`.
+- Prefer `agent/tools/launch_runtime_host.ps1` when the scratch RuntimeHost project is the validation target.
 - If a command or tool is underspecified, improve the implementation and the documentation until usage is explicit.
 
 Starter prompt:

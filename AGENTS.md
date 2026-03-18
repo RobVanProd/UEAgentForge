@@ -100,6 +100,7 @@ Preferred validation actions:
 - Compile the plugin directly with `RunUAT BuildPlugin` when a project is not required.
 - Compile against a host project target when editor integration must be validated.
 - Launch the Unreal Editor with a host project when screenshot, viewport, Remote Control API, or end-to-end command validation is needed.
+- Prefer `agent/tools/launch_runtime_host.ps1` for unattended RuntimeHost launches because it disables stale Unreal restore state before waiting for Remote Control.
 
 Preferred command patterns:
 
@@ -113,6 +114,10 @@ Preferred command patterns:
 
 ```powershell
 & "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" "C:\Users\Rob\Documents\Unreal Projects\UEAgentForge\agent\tmp\RuntimeHostProject\RuntimeHostProject.uproject" -NoSplash -Unattended -NullRHI -ExecCmds="QUIT_EDITOR" -log
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Users\Rob\Documents\Unreal Projects\UEAgentForge\agent\tools\launch_runtime_host.ps1" -StopExisting
 ```
 
 Use the narrowest action that proves the current slice. Do not claim Unreal validation unless the command was actually run successfully.
@@ -136,6 +141,7 @@ When C++ changes:
 - check that new files are referenced from the build/module setup,
 - compile the plugin or editor target if the Unreal toolchain is available,
 - launch the editor when the change affects viewport, screenshots, actor spawning, Remote Control API, or end-to-end tool behavior.
+- if the editor stalls behind a `Restore Packages` modal, clear the restore state or use `agent/tools/launch_runtime_host.ps1` before retrying.
 
 When Python changes:
 

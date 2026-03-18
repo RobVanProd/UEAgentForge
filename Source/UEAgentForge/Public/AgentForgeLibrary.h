@@ -257,16 +257,36 @@ private:
 	static FString Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_GetAvailableMeshes(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_GetAvailableMaterials(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetAvailableBlueprints(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetAvailableTextures(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetAvailableSounds(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetAssetDetails(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_FocusViewportOnActor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetViewportInfo();
 	static FString Cmd_SetViewportCamera(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_RedrawViewports();
 
 	// ─── Actor control ────────────────────────────────────────────────────────
 	static FString Cmd_SpawnActor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_DuplicateActor(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SpawnPointLight(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SpawnSpotLight(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SpawnRectLight(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SpawnDirectionalLight(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetActorTransform(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetStaticMesh(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetActorScale(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetActorLabel(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetActorMobility(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetActorVisibility(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GroupActors(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetActorProperty(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetActorProperty(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_CreateWall(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_CreateFloor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_CreateRoom(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_CreateCorridor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_CreatePillar(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_DeleteActor(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SaveCurrentLevel();
 	static FString Cmd_TakeScreenshot(const TSharedPtr<FJsonObject>& Args);
@@ -312,6 +332,10 @@ private:
 
 	// ─── Scene setup ──────────────────────────────────────────────────────────
 	static FString Cmd_SetupTestLevel(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_LLMChat(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_LLMStructured(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_LLMSetKey(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_LLMGetModels(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── v0.2.0 Unified Orchestration ─────────────────────────────────────────
 	// enhance_current_level: analyze composition + spatial placement + verification + screenshot

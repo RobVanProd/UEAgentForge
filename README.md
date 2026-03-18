@@ -46,7 +46,7 @@ AI Agent (Claude, GPT, etc.)
 │                        Phase 3: PostVerify          │
 │                        Phase 4: BuildCheck          │
 │                                                     │
-│  Command Surface (30+ commands)                     │
+│  Command Surface (40+ commands)                     │
 │  ─ Observation  ─ Actor Control  ─ Blueprints       │
 │  ─ Materials    ─ Content Mgmt   ─ Spatial Queries  │
 │  ─ Transactions ─ Python Bridge  ─ Perf Profiling   │
@@ -62,7 +62,8 @@ AI Agent (Claude, GPT, etc.)
 2. Re-generate project files (right-click `.uproject` → Generate Visual Studio files).
 3. Build the editor: `AquaEchosEditor Win64 Development` (or your project target).
 4. Enable **Remote Control API** in `Edit → Plugins → Remote Control`.
-5. The plugin auto-loads. Check the Output Log for:
+5. Keep **Python Script Plugin** enabled if you want `execute_python` support. UEAgentForge also declares it as a plugin dependency for UE 5.7 builds.
+6. The plugin auto-loads. Check the Output Log for:
    ```
    [UEAgentForge] Constitution loaded: ... (N rules)
    ```
@@ -79,6 +80,26 @@ UEAgentForge will auto-discover and enforce it at startup.
 pip install requests
 python PythonClient/ueagentforge_client.py
 ```
+
+## Autonomous Agent Workflow
+
+This repository now includes a Karpathy-style autonomous implementation setup for overnight work:
+
+- `AGENTS.md` - repo-wide operating contract for any coding agent
+- `CODEX.md` - Codex-specific entry point
+- `program.md` - persistent autonomous delivery loop
+- `agent/review_inbox.md` - tracked morning review file for blockers and decisions
+- `PythonClient/mcp_server/knowledge_base/building_guide.md` - scene-building and material-selection guidance for MCP/tool agents
+
+The current execution order is:
+
+1. `UEAGENTFORGE_V050_ADDENDUM_A.md`
+2. `UEAGENTFORGE_V050_GAMEPLAN.md`
+
+The workflow also explicitly allows Unreal validation through local tooling, including plugin compilation and launching the editor against a host project when a slice needs end-to-end proof.
+The root workflow docs include explicit `RunUAT BuildPlugin` and `UnrealEditor.exe` command patterns, plus the safe temporary host project path used for headless smoke tests.
+
+Point your coding agent at `CODEX.md` or `program.md`, then have it work through the addendum and main plan on a dedicated implementation branch.
 
 ## Quick Start
 
@@ -148,15 +169,27 @@ curl -X PUT http://127.0.0.1:30010/remote/object/call \
 | `get_current_level` | Current level package path, map lock status |
 | `assert_current_level` | Verify expected level matches current |
 | `get_actor_bounds` | AABB origin, extent, min, max |
+| `get_available_meshes` | Search Content Browser static meshes by keyword/path |
+| `get_available_materials` | Search materials and MICs by keyword/path |
+
+### Viewport & Capture
+| Command | Description |
+|---|---|
+| `set_viewport_camera` | Move the first perspective editor viewport camera |
+| `redraw_viewports` | Force a rendered frame before screenshot capture |
+| `take_screenshot` | Capture viewport to PNG via the staging screenshot path |
 
 ### Actor Control
 | Command | Description |
 |---|---|
 | `spawn_actor` | Spawn actor by class path at transform |
+| `spawn_point_light` | Spawn and configure a movable point light |
+| `spawn_spot_light` | Spawn and configure a movable spot light |
 | `set_actor_transform` | Move/rotate actor by object path |
+| `set_static_mesh` | Swap the mesh on an actor's static mesh component |
+| `set_actor_scale` | Set actor scale in XYZ |
 | `delete_actor` | Delete actor by label |
 | `save_current_level` | Save the current map |
-| `take_screenshot` | Capture viewport to PNG |
 
 ### Spatial Queries
 | Command | Description |
@@ -177,6 +210,9 @@ curl -X PUT http://127.0.0.1:30010/remote/object/call \
 |---|---|
 | `create_material_instance` | Create MIC from parent material |
 | `set_material_params` | Set scalar/vector parameters on MIC |
+| `apply_material_to_actor` | Apply a material to a mesh component slot |
+| `set_mesh_material_color` | Create/use a MID and push common tint params |
+| `set_material_scalar_param` | Set a scalar parameter on an actor MID slot |
 | `rename_asset` | Rename content browser asset |
 | `move_asset` | Move asset to different content path |
 | `delete_asset` | Delete asset (with reference check) |
@@ -347,7 +383,7 @@ Each phase is callable independently or as part of the closed-loop `generate_ful
 
 - Unreal Engine 5.5 or later (5.7 recommended)
 - Remote Control API plugin enabled
-- PythonScriptPlugin enabled (optional — for `execute_python`)
+- PythonScriptPlugin available (declared as a UEAgentForge dependency in UE 5.7; required for `execute_python`)
 - Windows / Linux / Mac (editor targets only)
 
 ## Contributing

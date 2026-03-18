@@ -10,7 +10,7 @@ UEAgentForge is an Unreal Engine 5 editor plugin that gives AI agents (Claude, G
 |---|---|---|
 | Unreal Engine | 5.5 or later | 5.7 recommended |
 | Remote Control API plugin | Bundled with UE | Must be enabled |
-| Python Script Plugin | Bundled with UE | Optional — required for `execute_python` |
+| Python Script Plugin | Bundled with UE | Auto-enabled as a UEAgentForge dependency in UE 5.7 builds; required for `execute_python` |
 | Python (host machine) | 3.9+ | For the Python client only |
 | `requests` library | Any recent | `pip install requests` |
 
@@ -105,9 +105,21 @@ actors = client.get_all_level_actors()
 print(f"Level has {len(actors)} actors.")
 ```
 
+## Autonomous workflow
+
+If you are running Codex or another coding agent against this repository, start from the root workflow docs instead of improvising:
+
+- [AGENTS.md](../AGENTS.md)
+- [CODEX.md](../CODEX.md)
+- [program.md](../program.md)
+- [agent/review_inbox.md](../agent/review_inbox.md)
+- [PythonClient/mcp_server/knowledge_base/building_guide.md](../PythonClient/mcp_server/knowledge_base/building_guide.md)
+
+The active execution order is Addendum A first, then the v0.5.0 game plan. Those docs also include the explicit UE 5.7 compile and editor-launch validation patterns used for overnight runs.
+
 ## Next steps
 
-- [Command Reference](02_command_reference.md) — full list of all 30+ commands
+- [Command Reference](02_command_reference.md) — full list of all 40+ commands
 - [Verification Protocol](03_verification_protocol.md) — how the 4-phase safety system works
 - [Constitution System](04_constitution_system.md) — project governance via markdown
 - [Python Client](05_python_client.md) — client API, context managers, examples

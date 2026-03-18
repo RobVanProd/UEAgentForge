@@ -26,5 +26,14 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Agent runtime artifacts
+agent/results.tsv
+agent/run.log
+agent/logs/
+agent/tmp/
+
+# BuildPlugin-generated packaging stub
+Config/FilterPlugin.ini
+
 # Packaged plugin
 *.zip

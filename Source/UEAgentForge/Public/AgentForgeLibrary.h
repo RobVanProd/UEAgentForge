@@ -255,12 +255,18 @@ private:
 	static FString Cmd_AssertCurrentLevel(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_GetActorBounds(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_GetWorldContext(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetAvailableMeshes(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_GetAvailableMaterials(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetViewportCamera(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_RedrawViewports();
 
 	// ─── Actor control ────────────────────────────────────────────────────────
 	static FString Cmd_SpawnActor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SpawnPointLight(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SpawnSpotLight(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetActorTransform(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetStaticMesh(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetActorScale(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_DeleteActor(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SaveCurrentLevel();
 	static FString Cmd_TakeScreenshot(const TSharedPtr<FJsonObject>& Args);
@@ -278,6 +284,9 @@ private:
 	// ─── Material instancing ──────────────────────────────────────────────────
 	static FString Cmd_CreateMaterialInstance(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SetMaterialParams(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_ApplyMaterialToActor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetMeshMaterialColor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetMaterialScalarParam(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── Content management ───────────────────────────────────────────────────
 	static FString Cmd_RenameAsset(const TSharedPtr<FJsonObject>& Args);

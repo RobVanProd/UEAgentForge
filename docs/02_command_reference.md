@@ -247,6 +247,118 @@ Get the axis-aligned bounding box of an actor.
 
 ---
 
+### `get_available_meshes`
+Search the Content Browser for static meshes by keyword and/or folder path.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `search_filter` | string | no | `""` | Case-insensitive substring match against asset name |
+| `path_filter` | string | no | `""` | Package path filter, e.g. `"/Game/Environment"` |
+| `max_results` | int | no | `50` | Maximum number of matches returned |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "search_filter": "wall",
+  "path_filter": "/Game/Environment",
+  "count": 2,
+  "assets": [
+    {
+      "asset_name": "SM_Wall_01",
+      "asset_path": "/Game/Environment/SM_Wall_01.SM_Wall_01",
+      "package_path": "/Game/Environment",
+      "class": "StaticMesh"
+    }
+  ]
+}
+```
+
+Use this before `set_static_mesh` so agents prefer project assets over fallback engine primitives.
+
+---
+
+### `get_available_materials`
+Search the Content Browser for materials and material instances by keyword and/or folder path.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `search_filter` | string | no | `""` | Case-insensitive substring match against asset name |
+| `path_filter` | string | no | `""` | Package path filter, e.g. `"/Game/Materials"` |
+| `max_results` | int | no | `50` | Maximum number of matches returned |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "search_filter": "concrete",
+  "path_filter": "/Game/Materials",
+  "count": 1,
+  "assets": [
+    {
+      "asset_name": "MI_Concrete_Wet",
+      "asset_path": "/Game/Materials/MI_Concrete_Wet.MI_Concrete_Wet",
+      "package_path": "/Game/Materials",
+      "class": "MaterialInstanceConstant"
+    }
+  ]
+}
+```
+
+Use this before `apply_material_to_actor` so agents select real project materials before falling back to flat tinting.
+
+---
+
+## Viewport & Capture Commands
+
+### `set_viewport_camera`
+Move the first perspective editor viewport camera to a specific world transform.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `x` | float | no | `0` | Camera world X |
+| `y` | float | no | `0` | Camera world Y |
+| `z` | float | no | `170` | Camera world Z |
+| `pitch` | float | no | `0` | Camera pitch |
+| `yaw` | float | no | `0` | Camera yaw |
+| `roll` | float | no | `0` | Camera roll |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "x": 0,
+  "y": -600,
+  "z": 300,
+  "pitch": -15,
+  "yaw": 90
+}
+```
+
+This changes the editor viewport only. It does not move any actors.
+
+---
+
+### `redraw_viewports`
+Force all editor viewports to render a fresh frame.
+
+**Args:** none
+
+**Response:**
+```json
+{ "ok": true, "detail": "All viewports redrawn." }
+```
+
+Call this immediately before `take_screenshot` when the editor may be idle.
+
+---
+
 ## Actor Control Commands
 
 All actor control commands are **mutating** and run through the full verification + transaction pipeline.
@@ -273,6 +385,62 @@ Spawn a new actor of a given class at a world transform.
 
 ---
 
+### `spawn_point_light`
+Spawn a movable `PointLight` actor with intensity, color, and attenuation radius.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `x` | float | yes | — | World X position |
+| `y` | float | yes | — | World Y position |
+| `z` | float | yes | — | World Z position |
+| `intensity` | float | no | `5000` | Point light intensity |
+| `color_r`, `color_g`, `color_b` | float | no | `1/1/1` | RGB light color |
+| `attenuation_radius` | float | no | `1200` | Light attenuation radius in cm |
+| `label` | string | no | `""` | Optional actor label |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "spawned_name": "PointLight_2",
+  "spawned_object_path": "...",
+  "label": "HallFill"
+}
+```
+
+---
+
+### `spawn_spot_light`
+Spawn a movable `SpotLight` actor with transform, color, and cone angles.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `x` | float | yes | — | World X position |
+| `y` | float | yes | — | World Y position |
+| `z` | float | yes | — | World Z position |
+| `rx`, `ry`, `rz` | float | no | `0/0/0` | Spot light rotation |
+| `intensity` | float | no | `5000` | Spot light intensity |
+| `color_r`, `color_g`, `color_b` | float | no | `1/1/1` | RGB light color |
+| `inner_cone_angle` | float | no | `15` | Inner cone angle in degrees |
+| `outer_cone_angle` | float | no | `30` | Outer cone angle in degrees |
+| `label` | string | no | `""` | Optional actor label |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "spawned_name": "SpotLight_1",
+  "spawned_object_path": "...",
+  "label": "DoorAccent"
+}
+```
+
+---
+
 ### `set_actor_transform`
 Move and/or rotate an existing actor. Only fields provided are changed.
 
@@ -287,6 +455,50 @@ Move and/or rotate an existing actor. Only fields provided are changed.
 **Response:**
 ```json
 { "ok": true, "actor_object_path": "..." }
+```
+
+---
+
+### `set_static_mesh`
+Swap the `UStaticMesh` used by an actor's static mesh component.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `mesh_path` | string | yes | Full static mesh object path |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Wall_A",
+  "mesh_path": "/Game/Environment/SM_Wall_01.SM_Wall_01"
+}
+```
+
+Use `get_available_meshes` first when the correct project mesh is unknown.
+
+---
+
+### `set_actor_scale`
+Set an actor's world scale. Missing axis fields keep the current value.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `actor_name` | string | yes | Actor label or name |
+| `sx`, `sy`, `sz` | float | no | New scale values for X/Y/Z |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Wall_A",
+  "scale": { "x": 4.0, "y": 0.25, "z": 3.0 }
+}
 ```
 
 ---
@@ -330,10 +542,12 @@ Capture the editor viewport as a PNG file.
 
 **Response:**
 ```json
-{ "ok": true, "path": "C:/...Saved/AgentForgeScreenshots/AgentForge_Screenshot_20260226_143022.png" }
+{ "ok": true, "path": "C:/HGShots/AgentForge_Screenshot_20260318_021530.png" }
 ```
 
-Saved to: `{ProjectDir}/Saved/AgentForgeScreenshots/`
+Saved to: `C:/HGShots/`
+
+The screenshot is written on the next rendered frame. Use `redraw_viewports` first when capturing from an unattended editor session.
 
 ---
 
@@ -499,6 +713,82 @@ Set scalar and/or vector parameters on a Material Instance Constant.
 **Response:**
 ```json
 { "ok": true, "scalars_set": 2, "vectors_set": 1 }
+```
+
+---
+
+### `apply_material_to_actor`
+Apply a material to a mesh component slot on an actor.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `actor_name` | string | yes | — | Actor label or name |
+| `material_path` | string | yes | — | Full material or MIC object path |
+| `slot_index` | int | no | `0` | Mesh material slot to update |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Wall_A",
+  "material_path": "/Game/Materials/MI_Concrete_Wet.MI_Concrete_Wet",
+  "slot_index": 0
+}
+```
+
+---
+
+### `set_mesh_material_color`
+Create or reuse a dynamic material instance on an actor mesh and attempt a common tint parameter update.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `actor_name` | string | yes | — | Actor label or name |
+| `r`, `g`, `b` | float | yes | — | RGB tint values |
+| `a` | float | no | `1.0` | Alpha value |
+| `slot_index` | int | no | `0` | Mesh material slot to update |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Wall_A",
+  "slot_index": 0,
+  "attempted_parameters": ["BaseColor", "Color", "Tint", "Base_Color"],
+  "color": { "x": 0.18, "y": 0.2, "z": 0.22 },
+  "alpha": 1.0
+}
+```
+
+This is the fallback when project-specific materials are unavailable or too expensive to search for in the current step.
+
+---
+
+### `set_material_scalar_param`
+Set a scalar parameter on a dynamic material instance assigned to an actor mesh slot.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `actor_name` | string | yes | — | Actor label or name |
+| `param_name` | string | yes | — | Scalar parameter name |
+| `value` | float | yes | — | Scalar value to assign |
+| `slot_index` | int | no | `0` | Mesh material slot to update |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "Wall_A",
+  "param_name": "Roughness",
+  "slot_index": 0,
+  "value": 0.8
+}
 ```
 
 ---

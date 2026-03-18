@@ -104,9 +104,12 @@ For unattended scratch-host launches, use `agent/tools/launch_runtime_host.ps1`;
 
 The current repo state includes:
 
-- Addendum A scene-building batches through read-only asset discovery, material discovery/application, point/spot/rect/directional lights, actor duplication/label/visibility/mobility/property controls, viewport helpers, and compound primitives for walls, floors, rooms, corridors, and pillars.
-- A Python MCP server under `PythonClient/mcp_server/` that exposes the scene-building surface to external agent hosts.
-- A Phase 1 LLM subsystem under `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/`, with provider discovery and runtime key configuration validated against UE 5.7.
+- Addendum A scene-building batches through read-only asset discovery, material discovery/application, point/spot/rect/directional lights, actor duplication/label/visibility/mobility/property controls, viewport helpers, compound primitives for walls, floors, rooms, corridors, staircases, pillars, scatter placement, and whole-scene atmosphere controls for fog, sky, and post-process.
+- A Python MCP server under `PythonClient/mcp_server/` that exposes scene building, structured-output, streaming-compatible, and vision tools to external agent hosts, plus a tracked `setup.py` bootstrap.
+- A Phase 1 and Phase 2 LLM stack under `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/`, including provider discovery, runtime key configuration, schema-backed structured output, and bundled content schemas under `Content/AgentForge/Schemas/`.
+- A Phase 4 vision loop with `vision_analyze` and `vision_quality_score`, plus OAPA scoring that blends semantic and multimodal feedback when a vision-capable provider key is configured.
+- Phase 5 Python examples for structured output, NPC dialogue generation, and vision scoring under `PythonClient/examples/`.
+- Live RuntimeHost validation artifacts for the latest Addendum A slice are written under `agent/logs/addendum_a_batch3_live_latest.tsv` and the timestamped `addendum_a_batch3_live_*.json` files.
 
 Point your coding agent at `CODEX.md` or `program.md`, then have it work through the addendum and main plan on a dedicated implementation branch.
 
@@ -216,7 +219,12 @@ curl -X PUT http://127.0.0.1:30010/remote/object/call \
 | `create_floor` | Spawn a scaled floor primitive centered on an area |
 | `create_room` | Spawn a grouped room from floor plus four walls |
 | `create_corridor` | Spawn a grouped corridor from floor, walls, and optional ceiling |
+| `create_staircase` | Spawn a grouped staircase from repeated step blocks |
 | `create_pillar` | Spawn a box or cylinder-based pillar primitive |
+| `scatter_props` | Spawn and group repeated mesh props with random placement and optional surface snapping |
+| `set_fog` | Create or update an exponential height fog actor |
+| `set_post_process` | Create or update the global unbound post-process volume |
+| `set_sky_atmosphere` | Apply a named sky preset across sky atmosphere, skylight, and directional light |
 | `delete_actor` | Delete actor by label |
 | `save_current_level` | Save the current map |
 
@@ -245,6 +253,17 @@ curl -X PUT http://127.0.0.1:30010/remote/object/call \
 | `rename_asset` | Rename content browser asset |
 | `move_asset` | Move asset to different content path |
 | `delete_asset` | Delete asset (with reference check) |
+
+### LLM & Vision
+| Command | Description |
+|---|---|
+| `llm_set_key` | Store a provider API key in the active editor session without writing it to disk |
+| `llm_get_models` | Return the built-in model list for Anthropic, OpenAI, DeepSeek, or OpenAI-compatible providers |
+| `llm_chat` | Send a standard chat request through the editor-side LLM subsystem |
+| `llm_stream` | Return a stream-compatible chunked response payload for clients that expect incremental output |
+| `llm_structured` | Request schema-constrained JSON from the provider |
+| `vision_analyze` | Capture the active viewport or a multi-view set and send it through a multimodal model |
+| `vision_quality_score` | Return a structured quality score, feedback, issues, and strengths for the current scene |
 
 ### Transaction Safety
 | Command | Description |

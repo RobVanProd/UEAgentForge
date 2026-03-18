@@ -41,7 +41,7 @@ args = parser.parse_args()
 
 # ─── Connect ───────────────────────────────────────────────────────────────
 print("=" * 60)
-print("  UEAgentForge v0.1.0 — M_AgentVerification Level Demo")
+print("  UEAgentForge v0.5.0 — M_AgentVerification Level Demo")
 print("=" * 60)
 
 client = AgentForgeClient(host=args.host, port=args.port, verify=True, verbose=False)

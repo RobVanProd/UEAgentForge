@@ -3,7 +3,7 @@
 | # | Document | Description |
 |---|---|---|
 | 1 | [Getting Started](01_getting_started.md) | Installation, first commands, prerequisites |
-| 2 | [Command Reference](02_command_reference.md) | All 40+ commands with args and response format |
+| 2 | [Command Reference](02_command_reference.md) | All 50+ commands with args and response format, including LLM and vision |
 | 3 | [Verification Protocol](03_verification_protocol.md) | 4-phase safety system deep-dive |
 | 4 | [Constitution System](04_constitution_system.md) | Markdown-based governance rules |
 | 5 | [Python Client](05_python_client.md) | Client API, context managers, all methods |

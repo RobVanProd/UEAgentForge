@@ -12,9 +12,13 @@ The current v0.5.0 foundation includes these Addendum A and subsystem slices:
 - light spawning commands (`spawn_point_light`, `spawn_spot_light`)
 - expanded discovery and inspection commands (`get_available_blueprints`, `get_available_textures`, `get_available_sounds`, `get_asset_details`)
 - actor metadata/property controls (`duplicate_actor`, `set_actor_label`, `set_actor_mobility`, `set_actor_visibility`, `get_actor_property`, `set_actor_property`, `group_actors`)
-- compound building primitives (`create_wall`, `create_floor`, `create_room`, `create_corridor`, `create_pillar`)
+- compound building primitives (`create_wall`, `create_floor`, `create_room`, `create_corridor`, `create_staircase`, `create_pillar`, `scatter_props`)
+- environment controls (`set_fog`, `set_post_process`, `set_sky_atmosphere`)
 - a Python MCP server under `PythonClient/mcp_server/` that exposes the same command surface to external agent hosts
 - a UE-side LLM subsystem under `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/`
+- schema-backed structured outputs via `UAgentForgeSchemaService` and bundled schema assets under `Content/AgentForge/Schemas/`
+- multimodal viewport analysis and scoring via `UAgentForgeVisionAnalyzer`
+- tracked Python examples for structured output, NPC dialogue generation, and vision scoring under `PythonClient/examples/`
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -134,6 +138,8 @@ This is safe because both classes only hold in-memory data (actor label arrays, 
 ```
 Source/UEAgentForge/
 ├── UEAgentForge.Build.cs          Module rules, all deps
+├── Public/LLM/                    Provider types, subsystem, schema, and vision declarations
+├── Private/LLM/                   Provider implementations and subsystem logic
 ├── Public/
 │   ├── AgentForgeLibrary.h        Main command surface declaration
 │   ├── VerificationEngine.h       4-phase protocol, FVerificationPhaseResult
@@ -143,12 +149,24 @@ Source/UEAgentForge/
     ├── AgentForgeLibrary.cpp      Command router + all handler implementations
     ├── VerificationEngine.cpp     Phase implementations, snapshot I/O
     └── ConstitutionParser.cpp     Markdown parser, keyword extraction
+
+Content/AgentForge/Schemas/
+├── npc_personality.json
+├── quest_structure.json
+└── level_layout.json
+
+PythonClient/
+├── ueagentforge_client.py         Python transport client + schema/vision helpers
+├── examples/                      Example workflows for structured, dialogue, and vision use
+└── mcp_server/                    MCP server, knowledge base, and packaging bootstrap
 ```
 
 Additional v0.5.0 frontier paths:
 
-- `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/` - provider interfaces, providers, and the editor LLM subsystem
-- `PythonClient/mcp_server/` - MCP server, host configs, and knowledge-base guidance
+- `Source/UEAgentForge/Public/LLM/` and `Source/UEAgentForge/Private/LLM/` - provider interfaces, providers, schema service, vision analyzer, and the editor LLM subsystem
+- `PythonClient/mcp_server/` - MCP server, host configs, knowledge-base guidance, and packaging bootstrap
+- `Content/AgentForge/Schemas/` - bundled JSON schemas for NPCs, quests, and level layouts
+- `PythonClient/examples/` - repo-tracked usage examples for the v0.5.0 workflow
 
 ## Dependency map
 
@@ -173,6 +191,10 @@ The root workflow docs (`AGENTS.md`, `CODEX.md`, `program.md`) now treat Unreal 
 The narrowest compile proof is `RunUAT BuildPlugin` against the detected UE 5.7 install. For editor smoke tests, the repo uses a temporary host project under `agent/tmp/RuntimeHostProject/` so command routing, plugin mounting, and headless editor startup can be proven without touching the user's live Unreal projects.
 
 Use `agent/tools/launch_runtime_host.ps1` for unattended scratch-host startup. It disables stale project and engine autosave restore state before waiting on `http://127.0.0.1:30010/remote/info`, which avoids the blocking Unreal `Restore Packages` modal discovered during live validation.
+
+The current live harness set includes `agent/tmp/addendum_a_batch2_live_test.py`, `agent/tmp/addendum_a_batch3_live_test.py`, and `agent/tmp/phase1_phase3_live_smoke.py`. The latest batch-3 artifact log is written to `agent/logs/addendum_a_batch3_live_latest.tsv`.
+
+For the v0.5.0 subsystem layer, validation now also includes Python compile checks for the client, MCP package bootstrap, and examples; plugin compilation with `RunUAT BuildPlugin`; and live editor smoke coverage for the LLM and MCP surface. Vision and chat success paths still require real provider keys, but the repo validates the missing-key paths and command wiring without persisting secrets to disk.
 
 ## Design principles
 

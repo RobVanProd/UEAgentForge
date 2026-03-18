@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "0.1.0",
+	"Version": 5,
+	"VersionName": "0.5.0",
 	"FriendlyName": "UEAgentForge",
 	"Description": "Enterprise-grade AI agent control surface for Unreal Engine 5. Provides a transactional, constitution-enforced, 4-phase-verified command bridge over the Remote Control API. The first free, open-source comprehensive bridge for AI-native UE5 development.",
 	"Category": "Scripting",

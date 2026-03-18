@@ -1,5 +1,5 @@
 ﻿"""
-UEAgentForge Python Client v0.1.0
+UEAgentForge Python Client v0.5.0
 ==================================
 HTTP client for the Unreal Remote Control API that routes all commands through
 the UEAgentForge plugin (AgentForgeLibrary) with optional safety verification.
@@ -36,8 +36,19 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 30010
 OBJECT_PATH  = "/Script/UEAgentForge.Default__AgentForgeLibrary"
 FUNCTION     = "ExecuteCommandJson"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SCHEMA_DIR = REPO_ROOT / "Content" / "AgentForge" / "Schemas"
 
 log = logging.getLogger("ueagentforge")
+
+
+def _normalize_schema_name(schema_name: str) -> str:
+    value = str(schema_name or "").strip()
+    if not value:
+        raise ValueError("schema_name is required")
+    if not value.lower().endswith(".json"):
+        value += ".json"
+    return value
 
 
 # â”€â”€â”€ Data types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -205,6 +216,13 @@ class AgentForgeClient:
                 continue
             results.append(self.execute(cmd, item.get("args", {}) or {}))
         return results
+
+    def load_schema(self, schema_name: str) -> Dict[str, Any]:
+        """Load a bundled JSON schema from Content/AgentForge/Schemas."""
+        schema_path = DEFAULT_SCHEMA_DIR / _normalize_schema_name(schema_name)
+        if not schema_path.exists():
+            raise FileNotFoundError(f"Schema not found: {schema_path}")
+        return json.loads(schema_path.read_text(encoding="utf-8"))
 
     # â”€â”€ Forge meta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def ping(self) -> Dict:
@@ -1106,6 +1124,32 @@ class AgentForgeClient:
             "slab_thickness": slab_thickness,
         })
 
+    def create_staircase(
+        self,
+        base_x: float,
+        base_y: float,
+        base_z: float,
+        direction: str,
+        step_count: int,
+        step_width: float,
+        step_depth: float,
+        step_height: float,
+        material_path: str = "",
+        label: str = "Staircase",
+    ) -> ForgeResult:
+        return self.execute("create_staircase", {
+            "base_x": base_x,
+            "base_y": base_y,
+            "base_z": base_z,
+            "direction": direction,
+            "step_count": step_count,
+            "step_width": step_width,
+            "step_depth": step_depth,
+            "step_height": step_height,
+            "material_path": material_path,
+            "label": label,
+        })
+
     def create_pillar(
         self,
         x: float,
@@ -1126,6 +1170,36 @@ class AgentForgeClient:
             "sides": sides,
             "material_path": material_path,
             "label": label,
+        })
+
+    def scatter_props(
+        self,
+        mesh_path: str,
+        center_x: float,
+        center_y: float,
+        radius: float,
+        count: int,
+        min_scale: float = 0.85,
+        max_scale: float = 1.15,
+        random_rotation: bool = True,
+        snap_to_surface: bool = True,
+        material_path: str = "",
+        label_prefix: str = "ScatterProp",
+        z: float = 0.0,
+    ) -> ForgeResult:
+        return self.execute("scatter_props", {
+            "mesh_path": mesh_path,
+            "center_x": center_x,
+            "center_y": center_y,
+            "radius": radius,
+            "count": count,
+            "min_scale": min_scale,
+            "max_scale": max_scale,
+            "random_rotation": random_rotation,
+            "snap_to_surface": snap_to_surface,
+            "material_path": material_path,
+            "label_prefix": label_prefix,
+            "z": z,
         })
 
     def delete_actor(self, label: str) -> ForgeResult:
@@ -1243,6 +1317,47 @@ class AgentForgeClient:
             "color_b": color_b,
             "label": label,
         })
+
+    def set_fog(
+        self,
+        density: float = 0.02,
+        height_falloff: float = 0.2,
+        start_distance: float = 0.0,
+        color_r: float = 0.7,
+        color_g: float = 0.75,
+        color_b: float = 0.8,
+    ) -> ForgeResult:
+        return self.execute("set_fog", {
+            "density": density,
+            "height_falloff": height_falloff,
+            "start_distance": start_distance,
+            "color_r": color_r,
+            "color_g": color_g,
+            "color_b": color_b,
+        })
+
+    def set_post_process(
+        self,
+        bloom_intensity: float = 0.3,
+        exposure_compensation: float = 0.0,
+        ambient_occlusion_intensity: float = 0.5,
+        vignette_intensity: float = 0.2,
+        saturation: float = 1.0,
+        contrast: float = 1.0,
+        color_temp: float = 6500.0,
+    ) -> ForgeResult:
+        return self.execute("set_post_process", {
+            "bloom_intensity": bloom_intensity,
+            "exposure_compensation": exposure_compensation,
+            "ambient_occlusion_intensity": ambient_occlusion_intensity,
+            "vignette_intensity": vignette_intensity,
+            "saturation": saturation,
+            "contrast": contrast,
+            "color_temp": color_temp,
+        })
+
+    def set_sky_atmosphere(self, preset: str = "default_day") -> ForgeResult:
+        return self.execute("set_sky_atmosphere", {"preset": preset})
 
     def take_screenshot(self, filename: str = "forge_screenshot") -> ForgeResult:
         return self.execute("take_screenshot", {"filename": filename})
@@ -1490,6 +1605,26 @@ unreal.EditorAssetLibrary.save_asset(asset_path)
             "custom_endpoint": custom_endpoint,
         })
 
+    def llm_stream(
+        self,
+        provider: str,
+        model: str,
+        messages: List[Dict[str, Any]],
+        system: str = "",
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.execute("llm_stream", {
+            "provider": provider,
+            "model": model,
+            "messages": messages,
+            "system": system,
+            "max_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "custom_endpoint": custom_endpoint,
+        })
+
     def llm_structured(
         self,
         provider: str,
@@ -1511,6 +1646,120 @@ unreal.EditorAssetLibrary.save_asset(asset_path)
             "temperature": float(temperature),
             "custom_endpoint": custom_endpoint,
         })
+
+    def llm_structured_from_schema(
+        self,
+        provider: str,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        system: str = "",
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.llm_structured(
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            schema=self.load_schema(schema_name),
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            custom_endpoint=custom_endpoint,
+        )
+
+    def generate_npc_personality(
+        self,
+        provider: str,
+        model: str,
+        prompt: str,
+        system: str = "",
+        max_tokens: int = 1024,
+        temperature: float = 0.4,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.llm_structured_from_schema(
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            schema_name="npc_personality",
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            custom_endpoint=custom_endpoint,
+        )
+
+    def generate_quest(
+        self,
+        provider: str,
+        model: str,
+        prompt: str,
+        system: str = "",
+        max_tokens: int = 1024,
+        temperature: float = 0.4,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.llm_structured_from_schema(
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            schema_name="quest_structure",
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            custom_endpoint=custom_endpoint,
+        )
+
+    def generate_level_layout(
+        self,
+        provider: str,
+        model: str,
+        prompt: str,
+        system: str = "",
+        max_tokens: int = 1400,
+        temperature: float = 0.3,
+        custom_endpoint: str = "",
+    ) -> ForgeResult:
+        return self.llm_structured_from_schema(
+            provider=provider,
+            model=model,
+            prompt=prompt,
+            schema_name="level_layout",
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            custom_endpoint=custom_endpoint,
+        )
+
+    def vision_analyze(
+        self,
+        prompt: str = "",
+        provider: str = "",
+        model: str = "",
+        multi_view: bool = False,
+    ) -> ForgeResult:
+        args: Dict[str, Any] = {"multi_view": bool(multi_view)}
+        if prompt:
+            args["prompt"] = prompt
+        if provider:
+            args["provider"] = provider
+        if model:
+            args["model"] = model
+        return self.execute("vision_analyze", args)
+
+    def vision_quality_score(
+        self,
+        provider: str = "",
+        model: str = "",
+        multi_view: bool = False,
+    ) -> ForgeResult:
+        args: Dict[str, Any] = {"multi_view": bool(multi_view)}
+        if provider:
+            args["provider"] = provider
+        if model:
+            args["model"] = model
+        return self.execute("vision_quality_score", args)
 
     # â”€â”€ Material instancing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def create_material_instance(

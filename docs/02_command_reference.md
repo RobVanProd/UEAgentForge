@@ -31,8 +31,8 @@ Health check. Returns plugin version and constitution status.
 **Response:**
 ```json
 {
-  "pong": "UEAgentForge v0.1.0",
-  "version": "0.1.0",
+  "pong": "UEAgentForge v0.5.0",
+  "version": "0.5.0",
   "constitution_loaded": true,
   "constitution_rules": 12
 }
@@ -48,7 +48,7 @@ Full status of the plugin runtime — version, constitution, last verification.
 **Response:**
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.5.0",
   "constitution_loaded": true,
   "constitution_rules_loaded": 12,
   "constitution_path": "C:/Users/.../ue_dev_constitution.md",
@@ -888,17 +888,17 @@ These compound tools build scaled primitive geometry using engine fallback meshe
 ### `create_wall`
 Spawn a wall segment between two world points.
 
-**Key args:** `start_x`, `start_y`, `end_x`, `end_y`, `z`, `height`, `thickness`, `material_path`, `label`
+**Key args:** `start_x`, `start_y`, `end_x`, `end_y`, `z`, `height`, `thickness`, `material_path`, `has_windows`, `window_spacing`, `window_height`, `label`
 
 **Response:**
 ```json
 {
   "ok": true,
-  "actor_name": "HallWall_A",
-  "actor_object_path": "...",
-  "length": 600.0,
-  "height": 300.0,
-  "thickness": 20.0
+  "label": "HallWall_A",
+  "segment_count": 3,
+  "segments": [
+    { "label": "HallWall_A_Solid_01", "object_path": "..." }
+  ]
 }
 ```
 
@@ -907,14 +907,14 @@ Spawn a wall segment between two world points.
 ### `create_floor`
 Spawn a floor slab centered on a rectangle.
 
-**Key args:** `center_x`, `center_y`, `z`, `width`, `depth`, `thickness`, `material_path`, `label`
+**Key args:** `center_x`, `center_y`, `z`, `width`, `length`, `thickness`, `material_path`, `label`
 
 ---
 
 ### `create_room`
 Spawn a grouped room from a floor and four walls.
 
-**Key args:** `center_x`, `center_y`, `z`, `width`, `depth`, `height`, `wall_thickness`, `floor_material`, `wall_material`, `label`
+**Key args:** `center_x`, `center_y`, `z`, `width`, `length`, `height`, `wall_thickness`, `slab_thickness`, `floor_material`, `wall_material`, `ceiling_material`, `door_wall`, `window_walls`, `label`
 
 **Response shape:** returns `group_name`, `group_object_path`, `child_count`, and `children[]`.
 
@@ -923,9 +923,29 @@ Spawn a grouped room from a floor and four walls.
 ### `create_corridor`
 Spawn a grouped corridor from floor, two walls, and optional ceiling.
 
-**Key args:** `start_x`, `start_y`, `end_x`, `end_y`, `z`, `width`, `height`, `wall_thickness`, `include_ceiling`, `floor_material`, `wall_material`, `label`
+**Key args:** `start_x`, `start_y`, `end_x`, `end_y`, `z`, `width`, `height`, `wall_thickness`, `slab_thickness`, `has_ceiling`, `floor_material`, `wall_material`, `label`
 
 **Response shape:** returns `group_name`, `group_object_path`, `child_count`, and `children[]`.
+
+---
+
+### `create_staircase`
+Spawn a grouped staircase from repeated step blocks.
+
+**Key args:** `base_x`, `base_y`, `base_z`, `direction`, `step_count`, `step_width`, `step_depth`, `step_height`, `material_path`, `label`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "group_name": "Staircase_A",
+  "group_object_path": "...",
+  "direction": "east",
+  "child_count": 8,
+  "total_rise": 160.0,
+  "total_run": 320.0
+}
+```
 
 ---
 
@@ -943,6 +963,63 @@ Spawn a pillar primitive. Box mode is used for low side counts, cylinder mode fo
   "radius": 25.0,
   "height": 300.0,
   "sides": 16
+}
+```
+
+---
+
+### `scatter_props`
+Spawn and group repeated mesh props with randomized placement and optional surface snapping.
+
+**Key args:** `mesh_path`, `center_x`, `center_y`, `z`, `radius`, `count`, `min_scale`, `max_scale`, `random_rotation`, `snap_to_surface`, `material_path`, `label_prefix`
+
+**Response shape:** returns `group_name`, `group_object_path`, `child_count`, `snapped_count`, and `children[]`.
+
+---
+
+## Environment & Atmosphere Commands
+
+### `set_fog`
+Create or update the first `ExponentialHeightFog` actor in the level.
+
+**Key args:** `density`, `height_falloff`, `start_distance`, `color_r`, `color_g`, `color_b`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "actor_name": "ExponentialHeightFog",
+  "actor_object_path": "...",
+  "density": 0.035,
+  "height_falloff": 0.18,
+  "start_distance": 250.0
+}
+```
+
+---
+
+### `set_post_process`
+Create or update a global unbound `PostProcessVolume`.
+
+**Key args:** `bloom_intensity`, `exposure_compensation`, `ambient_occlusion_intensity`, `vignette_intensity`, `saturation`, `contrast`, `color_temp`
+
+**Response shape:** returns `actor_name`, `actor_object_path`, and the applied numeric settings.
+
+---
+
+### `set_sky_atmosphere`
+Create or update a coordinated sky atmosphere, skylight, and directional light from a named preset.
+
+**Supported presets:** `default_day`, `golden_hour`, `overcast`, `night_clear`, `night_cloudy`, `stormy`, `alien_red`, `alien_green`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "preset": "golden_hour",
+  "sky_atmosphere": "SkyAtmosphere",
+  "sky_light": "SkyLight",
+  "directional_light": "DirectionalLight"
 }
 ```
 
@@ -1207,6 +1284,175 @@ Set a scalar parameter on a dynamic material instance assigned to an actor mesh 
   "value": 0.8
 }
 ```
+
+---
+
+## LLM and Vision Commands
+
+### `llm_set_key`
+Store a provider key in the active Unreal Editor session. Keys are not written to disk.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `provider` | string | yes | `Anthropic`, `OpenAI`, `DeepSeek`, or `OpenAICompatible` |
+| `key` | string | yes | API key for the selected provider |
+
+**Response:**
+```json
+{ "ok": true, "provider": "OpenAI" }
+```
+
+---
+
+### `llm_get_models`
+Return the built-in model list for a provider.
+
+**Args:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `provider` | string | yes | Provider name |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "provider": "Anthropic",
+  "models": ["claude-sonnet-4-20250514", "claude-3-5-sonnet-latest"]
+}
+```
+
+---
+
+### `llm_chat`
+Send a standard chat request through the editor-side LLM subsystem.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `provider` | string | yes | - | Provider name |
+| `model` | string | yes | - | Model identifier |
+| `messages` | array | yes | - | Chat messages with `role` and `content` |
+| `system` | string | no | `""` | Optional system prompt |
+| `max_tokens` | int | no | `1024` | Completion limit |
+| `temperature` | float | no | `0.7` | Sampling temperature |
+| `custom_endpoint` | string | no | `""` | OpenAI-compatible base URL |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "provider": "OpenAI",
+  "model": "gpt-4o",
+  "content": "..."
+}
+```
+
+---
+
+### `llm_stream`
+Return a stream-compatible chunked payload for clients that expect incremental output.
+
+**Args:** same as `llm_chat`
+
+**Response:**
+```json
+{
+  "ok": true,
+  "streamed": true,
+  "chunk_count": 3,
+  "chunks": ["Once ", "upon ", "a time..."],
+  "content": "Once upon a time..."
+}
+```
+
+The current implementation returns chunked compatibility output from the editor command layer rather than raw provider SSE frames.
+
+---
+
+### `llm_structured`
+Request schema-constrained JSON output.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `provider` | string | yes | - | Provider name |
+| `model` | string | yes | - | Model identifier |
+| `prompt` | string | yes | - | User prompt |
+| `schema` | object | yes | - | JSON schema object |
+| `system` | string | no | `""` | Optional system prompt |
+| `max_tokens` | int | no | `1024` | Completion limit |
+| `temperature` | float | no | `0.2` | Lower default for structured output |
+| `custom_endpoint` | string | no | `""` | OpenAI-compatible base URL |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "content": "{\"title\":\"...\"}",
+  "structured": {
+    "title": "..."
+  }
+}
+```
+
+Bundled schemas live under `Content/AgentForge/Schemas/`.
+
+---
+
+### `vision_analyze`
+Capture the active viewport or a multi-view camera set and send it to a multimodal model for scene analysis.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `prompt` | string | no | built-in analysis prompt | What the model should evaluate |
+| `provider` | string | no | auto | Leave blank to use the preferred configured vision provider |
+| `model` | string | no | auto | Leave blank to use the preferred configured model |
+| `multi_view` | bool | no | `false` | Capture four viewpoints instead of the current viewport only |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "provider": "Anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "multi_view": true,
+  "content": "..."
+}
+```
+
+---
+
+### `vision_quality_score`
+Capture the scene and return structured scoring feedback for composition, lighting, and set dressing.
+
+**Args:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `provider` | string | no | auto | Leave blank to use the preferred configured vision provider |
+| `model` | string | no | auto | Leave blank to use the preferred configured model |
+| `multi_view` | bool | no | `false` | Capture four viewpoints instead of the current viewport only |
+
+**Response:**
+```json
+{
+  "ok": true,
+  "score": 81.0,
+  "feedback": "Strong silhouette and mood, but prop density is low in the rear corners.",
+  "issues": ["Rear corners feel sparse"],
+  "strengths": ["Good focal lighting", "Readable silhouette"],
+  "multi_view": true
+}
+```
+
+This command is also consumed by the higher-level `observe_analyze_plan_act` loop when a vision-capable provider is configured.
 
 ---
 

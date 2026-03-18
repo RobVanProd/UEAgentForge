@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "title": { "type": "string" },
+    "premise": { "type": "string" },
+    "quest_giver": { "type": "string" },
+    "difficulty": {
+      "type": "string",
+      "enum": ["tutorial", "easy", "medium", "hard", "boss"]
+    },
+    "objectives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "summary": { "type": "string" },
+          "success_criteria": { "type": "string" }
+        },
+        "required": ["id", "summary", "success_criteria"],
+        "additionalProperties": false
+      }
+    },
+    "rewards": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "failure_state": { "type": "string" },
+    "twist": { "type": "string" },
+    "follow_up_hooks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "title",
+    "premise",
+    "quest_giver",
+    "difficulty",
+    "objectives",
+    "rewards",
+    "failure_state",
+    "twist",
+    "follow_up_hooks"
+  ],
+  "additionalProperties": false
+}

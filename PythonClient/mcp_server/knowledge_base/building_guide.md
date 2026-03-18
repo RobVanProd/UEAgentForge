@@ -56,8 +56,25 @@ This sequence is more reliable than trying to guess the correct mesh, scale, and
 1. Plan room centers on a grid.
 2. Create each room with doors facing the connection path.
 3. Connect rooms with corridors aligned to door openings.
-4. Add a `PlayerStart` near the main entry room.
-5. Add one or two lights per room.
+4. Use `create_staircase` when one room needs vertical access instead of free-floating props.
+5. Add a `PlayerStart` near the main entry room.
+6. Add one or two lights per room.
+
+## Prop Scatter Workflow
+
+1. Create or identify a valid support surface first.
+2. Choose a real project mesh with `get_available_meshes` when possible.
+3. Use `scatter_props` with `snap_to_surface=true` for debris, rocks, crates, and vegetation.
+4. Keep `min_scale` and `max_scale` close together unless exaggerated variation is intentional.
+5. Use a unique `label_prefix` so the scattered group is easy to inspect later.
+
+## Environment Pass Order
+
+1. `set_sky_atmosphere(...)`
+2. `set_fog(...)`
+3. Place key lights and accent lights
+4. `set_post_process(...)`
+5. Capture a screenshot and adjust in small steps
 
 ## Lighting Best Practices
 
@@ -102,4 +119,5 @@ After a building batch:
 2. If camera framing matters, call `set_viewport_camera`.
 3. Call `redraw_viewports`.
 4. Call `take_screenshot`.
-5. If the scene is still underspecified, refine the command description instead of repeating the same failing action.
+5. If a multimodal provider key is configured, call `vision_quality_score(multi_view=true)` to score readability, lighting, and set dressing.
+6. If the scene is still underspecified, refine the command description instead of repeating the same failing action.

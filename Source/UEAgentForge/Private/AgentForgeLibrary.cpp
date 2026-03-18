@@ -12,6 +12,8 @@
 #include "LevelPipelineModule.h"    // v0.4.0 Five-Phase AAA Level Pipeline
 #include "Operators/ProceduralOpsModule.h"    // v0.5.0 Deterministic Operator Pipeline
 #include "LLM/AgentForgeLLMSubsystem.h"
+#include "LLM/AgentForgeSchemaService.h"
+#include "LLM/AgentForgeVisionAnalyzer.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
@@ -43,10 +45,17 @@
 #include "Components/PointLightComponent.h"
 #include "Components/SpotLightComponent.h"
 #include "Components/RectLightComponent.h"
+#include "Components/DirectionalLightComponent.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Components/SkyAtmosphereComponent.h"
+#include "Components/SkyLightComponent.h"
 #include "Engine/DirectionalLight.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Engine/PostProcessVolume.h"
 #include "Engine/PointLight.h"
 #include "Engine/SkyLight.h"
 #include "Engine/Texture2D.h"
+#include "Engine/World.h"
 // Blueprint manipulation
 #include "Kismet2/KismetEditorUtilities.h"
 #include "BlueprintEditorLibrary.h"
@@ -730,6 +739,117 @@ static AStaticMeshActor* SpawnStaticMeshPrimitiveActor(
 	return Actor;
 }
 
+template<typename TActor>
+static TActor* FindFirstActorOfClass(UWorld* World)
+{
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<TActor> It(World); It; ++It)
+	{
+		TActor* Actor = *It;
+		if (Actor && IsValid(Actor))
+		{
+			return Actor;
+		}
+	}
+
+	return nullptr;
+}
+
+template<typename TActor>
+static TActor* FindOrSpawnSingletonActor(
+	UWorld* World,
+	const FVector& Location,
+	const FRotator& Rotation,
+	const FString& Label,
+	FString& OutError)
+{
+	OutError.Reset();
+	if (!World)
+	{
+		OutError = TEXT("No editor world.");
+		return nullptr;
+	}
+
+	if (TActor* Existing = FindFirstActorOfClass<TActor>(World))
+	{
+		return Existing;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	TActor* Spawned = World->SpawnActor<TActor>(TActor::StaticClass(), Location, Rotation, Params);
+	if (!Spawned)
+	{
+		OutError = FString::Printf(TEXT("Failed to spawn %s."), *TActor::StaticClass()->GetName());
+		return nullptr;
+	}
+
+	Spawned->Modify();
+	if (!Label.IsEmpty())
+	{
+		Spawned->SetActorLabel(Label);
+	}
+	return Spawned;
+}
+
+static bool ParseCardinalDirection(const FString& DirectionInput, FVector& OutForward, float& OutYaw)
+{
+	FString Direction = DirectionInput;
+	Direction.TrimStartAndEndInline();
+	Direction.ToLowerInline();
+
+	if (Direction == TEXT("north"))
+	{
+		OutForward = FVector(1.0f, 0.0f, 0.0f);
+		OutYaw = 0.0f;
+		return true;
+	}
+	if (Direction == TEXT("south"))
+	{
+		OutForward = FVector(-1.0f, 0.0f, 0.0f);
+		OutYaw = 180.0f;
+		return true;
+	}
+	if (Direction == TEXT("east"))
+	{
+		OutForward = FVector(0.0f, 1.0f, 0.0f);
+		OutYaw = 90.0f;
+		return true;
+	}
+	if (Direction == TEXT("west"))
+	{
+		OutForward = FVector(0.0f, -1.0f, 0.0f);
+		OutYaw = -90.0f;
+		return true;
+	}
+
+	return false;
+}
+
+static bool RaycastDownToSurface(UWorld* World, const FVector& XYLocation, float QueryZ, FVector& OutHitLocation)
+{
+	if (!World)
+	{
+		return false;
+	}
+
+	const FVector Start(XYLocation.X, XYLocation.Y, QueryZ + 5000.0f);
+	const FVector End(XYLocation.X, XYLocation.Y, QueryZ - 5000.0f);
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(AgentForgeScatterSurfaceTrace), true);
+	if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+	{
+		return false;
+	}
+
+	OutHitLocation = Hit.ImpactPoint;
+	return true;
+}
+
 static UActorComponent* FindActorComponentByNameOrClass(AActor* Actor, const FString& Segment)
 {
 	if (!Actor || Segment.IsEmpty())
@@ -1066,6 +1186,145 @@ static TSharedPtr<FJsonObject> BuildLLMResponseObject(
 	return Obj;
 }
 
+static TArray<FString> ChunkTextForStream(const FString& Content, int32 TargetChars = 160)
+{
+	TArray<FString> Chunks;
+	if (Content.IsEmpty())
+	{
+		return Chunks;
+	}
+
+	TArray<FString> Words;
+	Content.ParseIntoArray(Words, TEXT(" "), true);
+	FString CurrentChunk;
+	for (const FString& Word : Words)
+	{
+		const FString Candidate = CurrentChunk.IsEmpty() ? Word : CurrentChunk + TEXT(" ") + Word;
+		if (!CurrentChunk.IsEmpty() && Candidate.Len() > TargetChars)
+		{
+			Chunks.Add(CurrentChunk);
+			CurrentChunk = Word;
+		}
+		else
+		{
+			CurrentChunk = Candidate;
+		}
+	}
+
+	if (!CurrentChunk.IsEmpty())
+	{
+		Chunks.Add(CurrentChunk);
+	}
+
+	if (Chunks.Num() == 0)
+	{
+		Chunks.Add(Content);
+	}
+
+	return Chunks;
+}
+
+static bool ParseVisionQualityPayload(
+	const FString& JsonString,
+	float& OutScore,
+	FString& OutFeedback,
+	TArray<FString>& OutIssues,
+	TArray<FString>& OutStrengths)
+{
+	OutScore = 0.0f;
+	OutFeedback.Reset();
+	OutIssues.Reset();
+	OutStrengths.Reset();
+
+	TSharedPtr<FJsonObject> Root;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
+	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	{
+		return false;
+	}
+
+	if (!Root->HasTypedField<EJson::Number>(TEXT("score")))
+	{
+		return false;
+	}
+
+	OutScore = (float)Root->GetNumberField(TEXT("score"));
+	Root->TryGetStringField(TEXT("feedback"), OutFeedback);
+
+	const TArray<TSharedPtr<FJsonValue>>* Issues = nullptr;
+	if (Root->TryGetArrayField(TEXT("issues"), Issues) && Issues)
+	{
+		for (const TSharedPtr<FJsonValue>& IssueValue : *Issues)
+		{
+			if (IssueValue.IsValid())
+			{
+				OutIssues.Add(IssueValue->AsString());
+			}
+		}
+	}
+
+	const TArray<TSharedPtr<FJsonValue>>* Strengths = nullptr;
+	if (Root->TryGetArrayField(TEXT("strengths"), Strengths) && Strengths)
+	{
+		for (const TSharedPtr<FJsonValue>& StrengthValue : *Strengths)
+		{
+			if (StrengthValue.IsValid())
+			{
+				OutStrengths.Add(StrengthValue->AsString());
+			}
+		}
+	}
+
+	return true;
+}
+
+static bool ResolvePreferredVisionProviderAndModel(
+	const FString& ProviderString,
+	const FString& RequestedModel,
+	EAgentForgeLLMProvider& OutProvider,
+	FString& OutModel)
+{
+	if (!ProviderString.IsEmpty())
+	{
+		if (!ParseLLMProviderName(ProviderString, OutProvider))
+		{
+			return false;
+		}
+	}
+	else
+	{
+		const TArray<EAgentForgeLLMProvider> PreferredProviders = {
+			EAgentForgeLLMProvider::Anthropic,
+			EAgentForgeLLMProvider::OpenAI,
+			EAgentForgeLLMProvider::DeepSeek,
+			EAgentForgeLLMProvider::OpenAICompatible,
+		};
+
+		OutProvider = EAgentForgeLLMProvider::Anthropic;
+		for (const EAgentForgeLLMProvider Candidate : PreferredProviders)
+		{
+			if (Candidate == EAgentForgeLLMProvider::OpenAICompatible ||
+				!UAgentForgeLLMSubsystem::GetApiKey(Candidate).IsEmpty())
+			{
+				OutProvider = Candidate;
+				break;
+			}
+		}
+	}
+
+	OutModel = RequestedModel;
+	if (OutModel.IsEmpty())
+	{
+		const TArray<FString> Models = UAgentForgeLLMSubsystem::GetAvailableModels(OutProvider);
+		if (Models.Num() > 0)
+		{
+			OutModel = Models[0];
+		}
+	}
+
+	return !OutModel.IsEmpty();
+}
+
 #endif // WITH_EDITOR
 
 // ============================================================================
@@ -1142,7 +1401,8 @@ bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
 		TEXT("set_actor_label"), TEXT("set_actor_mobility"), TEXT("set_actor_visibility"),
 		TEXT("group_actors"), TEXT("set_actor_property"),
 		TEXT("create_wall"), TEXT("create_floor"), TEXT("create_room"),
-		TEXT("create_corridor"), TEXT("create_pillar"),
+		TEXT("create_corridor"), TEXT("create_staircase"), TEXT("create_pillar"),
+		TEXT("scatter_props"), TEXT("set_fog"), TEXT("set_post_process"), TEXT("set_sky_atmosphere"),
 		TEXT("create_blueprint"), TEXT("compile_blueprint"), TEXT("set_bp_cdo_property"),
 		TEXT("edit_blueprint_node"), TEXT("create_material_instance"), TEXT("set_material_params"),
 		TEXT("apply_material_to_actor"), TEXT("set_mesh_material_color"),
@@ -1302,9 +1562,12 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("enforce_constitution"))  { return Cmd_EnforceConstitution(Args); }
 	if (Cmd == TEXT("get_forge_status"))      { return Cmd_GetForgeStatus(); }
 	if (Cmd == TEXT("llm_chat"))              { return Cmd_LLMChat(Args); }
+	if (Cmd == TEXT("llm_stream"))            { return Cmd_LLMStream(Args); }
 	if (Cmd == TEXT("llm_structured"))        { return Cmd_LLMStructured(Args); }
 	if (Cmd == TEXT("llm_set_key"))           { return Cmd_LLMSetKey(Args); }
 	if (Cmd == TEXT("llm_get_models"))        { return Cmd_LLMGetModels(Args); }
+	if (Cmd == TEXT("vision_analyze"))        { return Cmd_VisionAnalyze(Args); }
+	if (Cmd == TEXT("vision_quality_score"))  { return Cmd_VisionQualityScore(Args); }
 	if (Cmd == TEXT("set_viewport_camera"))   { return Cmd_SetViewportCamera(Args); }
 	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
 	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController Blueprint
@@ -1423,7 +1686,12 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 		Cmd == TEXT("create_floor") ||
 		Cmd == TEXT("create_room") ||
 		Cmd == TEXT("create_corridor") ||
+		Cmd == TEXT("create_staircase") ||
 		Cmd == TEXT("create_pillar") ||
+		Cmd == TEXT("scatter_props") ||
+		Cmd == TEXT("set_fog") ||
+		Cmd == TEXT("set_post_process") ||
+		Cmd == TEXT("set_sky_atmosphere") ||
 		Cmd == TEXT("create_blueprint") ||
 		Cmd == TEXT("create_material_instance") ||
 		Cmd == TEXT("rename_asset") ||
@@ -1460,7 +1728,12 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 				else if (Cmd == TEXT("create_floor"))            { Dummy = Cmd_CreateFloor(Args); }
 				else if (Cmd == TEXT("create_room"))             { Dummy = Cmd_CreateRoom(Args); }
 				else if (Cmd == TEXT("create_corridor"))         { Dummy = Cmd_CreateCorridor(Args); }
+				else if (Cmd == TEXT("create_staircase"))        { Dummy = Cmd_CreateStaircase(Args); }
 				else if (Cmd == TEXT("create_pillar"))           { Dummy = Cmd_CreatePillar(Args); }
+				else if (Cmd == TEXT("scatter_props"))           { Dummy = Cmd_ScatterProps(Args); }
+				else if (Cmd == TEXT("set_fog"))                 { Dummy = Cmd_SetFog(Args); }
+				else if (Cmd == TEXT("set_post_process"))        { Dummy = Cmd_SetPostProcess(Args); }
+				else if (Cmd == TEXT("set_sky_atmosphere"))      { Dummy = Cmd_SetSkyAtmosphere(Args); }
 				else if (Cmd == TEXT("delete_actor"))            { Dummy = Cmd_DeleteActor(Args); }
 				else if (Cmd == TEXT("create_blueprint"))        { Dummy = Cmd_CreateBlueprint(Args); }
 				else if (Cmd == TEXT("compile_blueprint"))       { Dummy = Cmd_CompileBlueprint(Args); }
@@ -1519,7 +1792,12 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	else if (Cmd == TEXT("create_floor"))        { CommandResult = Cmd_CreateFloor(Args); }
 	else if (Cmd == TEXT("create_room"))         { CommandResult = Cmd_CreateRoom(Args); }
 	else if (Cmd == TEXT("create_corridor"))     { CommandResult = Cmd_CreateCorridor(Args); }
+	else if (Cmd == TEXT("create_staircase"))    { CommandResult = Cmd_CreateStaircase(Args); }
 	else if (Cmd == TEXT("create_pillar"))       { CommandResult = Cmd_CreatePillar(Args); }
+	else if (Cmd == TEXT("scatter_props"))       { CommandResult = Cmd_ScatterProps(Args); }
+	else if (Cmd == TEXT("set_fog"))             { CommandResult = Cmd_SetFog(Args); }
+	else if (Cmd == TEXT("set_post_process"))    { CommandResult = Cmd_SetPostProcess(Args); }
+	else if (Cmd == TEXT("set_sky_atmosphere"))  { CommandResult = Cmd_SetSkyAtmosphere(Args); }
 	else if (Cmd == TEXT("delete_actor"))        { CommandResult = Cmd_DeleteActor(Args); }
 	else if (Cmd == TEXT("create_blueprint"))    { CommandResult = Cmd_CreateBlueprint(Args); }
 	else if (Cmd == TEXT("compile_blueprint"))   { CommandResult = Cmd_CompileBlueprint(Args); }
@@ -1613,8 +1891,8 @@ bool UAgentForgeLibrary::EditBlueprintNode(const FString& BlueprintPath, const F
 FString UAgentForgeLibrary::Cmd_Ping(const TSharedPtr<FJsonObject>& Args)
 {
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-	Obj->SetStringField(TEXT("pong"), TEXT("UEAgentForge v0.1.0"));
-	Obj->SetStringField(TEXT("version"), TEXT("0.1.0"));
+	Obj->SetStringField(TEXT("pong"), TEXT("UEAgentForge v0.5.0"));
+	Obj->SetStringField(TEXT("version"), TEXT("0.5.0"));
 	UConstitutionParser* Parser = UConstitutionParser::Get();
 	Obj->SetBoolField(TEXT("constitution_loaded"), Parser && Parser->IsLoaded());
 	Obj->SetNumberField(TEXT("constitution_rules"), Parser ? Parser->GetRules().Num() : 0);
@@ -3867,6 +4145,573 @@ FString UAgentForgeLibrary::Cmd_CreateCorridor(const TSharedPtr<FJsonObject>& Ar
 #endif
 }
 
+FString UAgentForgeLibrary::Cmd_CreateStaircase(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float BaseX = Args->HasField(TEXT("base_x")) ? (float)Args->GetNumberField(TEXT("base_x")) : 0.0f;
+	const float BaseY = Args->HasField(TEXT("base_y")) ? (float)Args->GetNumberField(TEXT("base_y")) : 0.0f;
+	const float BaseZ = Args->HasField(TEXT("base_z")) ? (float)Args->GetNumberField(TEXT("base_z")) : 0.0f;
+	const int32 StepCount = Args->HasField(TEXT("step_count")) ? (int32)Args->GetNumberField(TEXT("step_count")) : 12;
+	const float StepWidth = Args->HasField(TEXT("step_width")) ? (float)Args->GetNumberField(TEXT("step_width")) : 150.0f;
+	const float StepDepth = Args->HasField(TEXT("step_depth")) ? (float)Args->GetNumberField(TEXT("step_depth")) : 30.0f;
+	const float StepHeight = Args->HasField(TEXT("step_height")) ? (float)Args->GetNumberField(TEXT("step_height")) : 18.0f;
+	FString Direction = TEXT("north");
+	FString MaterialPath;
+	FString Label = TEXT("Staircase");
+	Args->TryGetStringField(TEXT("direction"), Direction);
+	Args->TryGetStringField(TEXT("material_path"), MaterialPath);
+	Args->TryGetStringField(TEXT("label"), Label);
+
+	if (StepCount <= 0)
+	{
+		return ErrorResponse(TEXT("step_count must be greater than zero."));
+	}
+	if (StepWidth <= KINDA_SMALL_NUMBER || StepDepth <= KINDA_SMALL_NUMBER || StepHeight <= KINDA_SMALL_NUMBER)
+	{
+		return ErrorResponse(TEXT("step_width, step_depth, and step_height must be greater than zero."));
+	}
+
+	FVector Forward = FVector::ForwardVector;
+	float YawDeg = 0.0f;
+	if (!ParseCardinalDirection(Direction, Forward, YawDeg))
+	{
+		return ErrorResponse(TEXT("direction must be north, south, east, or west."));
+	}
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString GroupError;
+	AActor* GroupActor = SpawnGroupActor(World, Label, FVector(BaseX, BaseY, BaseZ), GroupError);
+	if (!GroupActor)
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	const FRotator Rotation(0.0f, YawDeg, 0.0f);
+	const FVector BaseLocation(BaseX, BaseY, BaseZ);
+	TArray<AActor*> StepActors;
+	StepActors.Reserve(StepCount);
+
+	for (int32 StepIndex = 0; StepIndex < StepCount; ++StepIndex)
+	{
+		const float AlongOffset = (StepDepth * StepIndex) + (StepDepth * 0.5f);
+		const float HeightOffset = (StepHeight * StepIndex) + (StepHeight * 0.5f);
+		const FVector StepCenter = BaseLocation + (Forward * AlongOffset) + FVector(0.0f, 0.0f, HeightOffset);
+
+		FString SpawnError;
+		AStaticMeshActor* StepActor = SpawnBoxActor(
+			World,
+			StepCenter,
+			FVector(StepDepth, StepWidth, StepHeight),
+			Rotation,
+			FString::Printf(TEXT("%s_Step_%02d"), *Label, StepIndex + 1),
+			MaterialPath,
+			SpawnError);
+		if (!StepActor)
+		{
+			return ErrorResponse(SpawnError);
+		}
+
+		AttachActorToParent(StepActor, GroupActor);
+		StepActors.Add(StepActor);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ActorArray;
+	for (AActor* Actor : StepActors)
+	{
+		AddActorSummary(ActorArray, Actor);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("group_name"), GroupActor->GetActorLabel());
+	Root->SetStringField(TEXT("group_object_path"), GroupActor->GetPathName());
+	Root->SetStringField(TEXT("direction"), Direction);
+	Root->SetNumberField(TEXT("child_count"), StepActors.Num());
+	Root->SetNumberField(TEXT("total_rise"), StepHeight * StepCount);
+	Root->SetNumberField(TEXT("total_run"), StepDepth * StepCount);
+	Root->SetArrayField(TEXT("children"), ActorArray);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_ScatterProps(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString MeshPath;
+	Args->TryGetStringField(TEXT("mesh_path"), MeshPath);
+	if (MeshPath.IsEmpty())
+	{
+		return ErrorResponse(TEXT("scatter_props requires mesh_path."));
+	}
+
+	const float CenterX = Args->HasField(TEXT("center_x")) ? (float)Args->GetNumberField(TEXT("center_x")) : 0.0f;
+	const float CenterY = Args->HasField(TEXT("center_y")) ? (float)Args->GetNumberField(TEXT("center_y")) : 0.0f;
+	const float BaseZ = Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : 0.0f;
+	const float Radius = Args->HasField(TEXT("radius")) ? (float)Args->GetNumberField(TEXT("radius")) : 250.0f;
+	const int32 Count = Args->HasField(TEXT("count")) ? (int32)Args->GetNumberField(TEXT("count")) : 8;
+	const float MinScale = Args->HasField(TEXT("min_scale")) ? (float)Args->GetNumberField(TEXT("min_scale")) : 0.85f;
+	const float MaxScale = Args->HasField(TEXT("max_scale")) ? (float)Args->GetNumberField(TEXT("max_scale")) : 1.15f;
+	const bool bRandomRotation = !Args->HasField(TEXT("random_rotation")) || Args->GetBoolField(TEXT("random_rotation"));
+	const bool bSnapToSurface = !Args->HasField(TEXT("snap_to_surface")) || Args->GetBoolField(TEXT("snap_to_surface"));
+	FString MaterialPath;
+	FString LabelPrefix = TEXT("ScatterProp");
+	Args->TryGetStringField(TEXT("material_path"), MaterialPath);
+	Args->TryGetStringField(TEXT("label_prefix"), LabelPrefix);
+
+	if (Radius <= KINDA_SMALL_NUMBER)
+	{
+		return ErrorResponse(TEXT("radius must be greater than zero."));
+	}
+	if (Count <= 0)
+	{
+		return ErrorResponse(TEXT("count must be greater than zero."));
+	}
+	if (MinScale <= KINDA_SMALL_NUMBER || MaxScale <= KINDA_SMALL_NUMBER || MaxScale < MinScale)
+	{
+		return ErrorResponse(TEXT("min_scale and max_scale must be greater than zero, and max_scale must be >= min_scale."));
+	}
+
+	UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, *MeshPath);
+	if (!Mesh)
+	{
+		return ErrorResponse(FString::Printf(TEXT("Static mesh not found: %s"), *MeshPath));
+	}
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString GroupError;
+	AActor* GroupActor = SpawnGroupActor(
+		World,
+		LabelPrefix + TEXT("_Group"),
+		FVector(CenterX, CenterY, BaseZ),
+		GroupError);
+	if (!GroupActor)
+	{
+		return ErrorResponse(GroupError);
+	}
+
+	const float BaseExtentZ = FMath::Max(1.0f, Mesh->GetBounds().BoxExtent.Z);
+	const FVector ScatterCenter(CenterX, CenterY, BaseZ);
+	TArray<AActor*> SpawnedActors;
+	SpawnedActors.Reserve(Count);
+	int32 SnappedCount = 0;
+
+	for (int32 Index = 0; Index < Count; ++Index)
+	{
+		const float Angle = FMath::FRandRange(0.0f, 2.0f * PI);
+		const float Distance = FMath::Sqrt(FMath::FRand()) * Radius;
+		const FVector XYOffset(FMath::Cos(Angle) * Distance, FMath::Sin(Angle) * Distance, 0.0f);
+		const float UniformScale = FMath::FRandRange(MinScale, MaxScale);
+		const float HalfHeight = BaseExtentZ * UniformScale;
+
+		FVector SpawnLocation = ScatterCenter + XYOffset + FVector(0.0f, 0.0f, HalfHeight);
+		if (bSnapToSurface)
+		{
+			FVector HitLocation;
+			if (RaycastDownToSurface(World, ScatterCenter + XYOffset, BaseZ, HitLocation))
+			{
+				SpawnLocation = HitLocation + FVector(0.0f, 0.0f, HalfHeight);
+				++SnappedCount;
+			}
+		}
+
+		const FRotator Rotation = bRandomRotation
+			? FRotator(0.0f, FMath::FRandRange(0.0f, 360.0f), 0.0f)
+			: FRotator::ZeroRotator;
+
+		FString SpawnError;
+		AStaticMeshActor* PropActor = SpawnStaticMeshPrimitiveActor(
+			World,
+			Mesh,
+			SpawnLocation,
+			FVector(UniformScale),
+			Rotation,
+			FString::Printf(TEXT("%s_%02d"), *LabelPrefix, Index + 1),
+			MaterialPath,
+			SpawnError);
+		if (!PropActor)
+		{
+			return ErrorResponse(SpawnError);
+		}
+
+		AttachActorToParent(PropActor, GroupActor);
+		SpawnedActors.Add(PropActor);
+	}
+
+	TArray<TSharedPtr<FJsonValue>> ActorArray;
+	for (AActor* Actor : SpawnedActors)
+	{
+		AddActorSummary(ActorArray, Actor);
+	}
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("group_name"), GroupActor->GetActorLabel());
+	Root->SetStringField(TEXT("group_object_path"), GroupActor->GetPathName());
+	Root->SetStringField(TEXT("mesh_path"), MeshPath);
+	Root->SetNumberField(TEXT("child_count"), SpawnedActors.Num());
+	Root->SetNumberField(TEXT("radius"), Radius);
+	Root->SetNumberField(TEXT("snapped_count"), SnappedCount);
+	Root->SetArrayField(TEXT("children"), ActorArray);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetFog(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float Density = Args->HasField(TEXT("density")) ? (float)Args->GetNumberField(TEXT("density")) : 0.02f;
+	const float HeightFalloff = Args->HasField(TEXT("height_falloff")) ? (float)Args->GetNumberField(TEXT("height_falloff")) : 0.2f;
+	const float StartDistance = Args->HasField(TEXT("start_distance")) ? (float)Args->GetNumberField(TEXT("start_distance")) : 0.0f;
+	const float ColorR = Args->HasField(TEXT("color_r")) ? (float)Args->GetNumberField(TEXT("color_r")) : 0.7f;
+	const float ColorG = Args->HasField(TEXT("color_g")) ? (float)Args->GetNumberField(TEXT("color_g")) : 0.75f;
+	const float ColorB = Args->HasField(TEXT("color_b")) ? (float)Args->GetNumberField(TEXT("color_b")) : 0.8f;
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString SpawnError;
+	AExponentialHeightFog* FogActor = FindOrSpawnSingletonActor<AExponentialHeightFog>(
+		World,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		TEXT("AgentForgeFog"),
+		SpawnError);
+	if (!FogActor)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	UExponentialHeightFogComponent* FogComponent = FogActor->GetComponent();
+	if (!FogComponent)
+	{
+		return ErrorResponse(TEXT("Fog actor has no fog component."));
+	}
+
+	FogActor->Modify();
+	FogComponent->Modify();
+	FogComponent->SetFogDensity(Density);
+	FogComponent->SetFogHeightFalloff(HeightFalloff);
+	FogComponent->SetStartDistance(StartDistance);
+	FogComponent->SetFogInscatteringColor(FLinearColor(ColorR, ColorG, ColorB));
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), FogActor->GetActorLabel());
+	Root->SetStringField(TEXT("actor_object_path"), FogActor->GetPathName());
+	Root->SetNumberField(TEXT("density"), Density);
+	Root->SetNumberField(TEXT("height_falloff"), HeightFalloff);
+	Root->SetNumberField(TEXT("start_distance"), StartDistance);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetPostProcess(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	const float BloomIntensity = Args->HasField(TEXT("bloom_intensity")) ? (float)Args->GetNumberField(TEXT("bloom_intensity")) : 0.3f;
+	const float ExposureCompensation = Args->HasField(TEXT("exposure_compensation")) ? (float)Args->GetNumberField(TEXT("exposure_compensation")) : 0.0f;
+	const float AmbientOcclusionIntensity = Args->HasField(TEXT("ambient_occlusion_intensity")) ? (float)Args->GetNumberField(TEXT("ambient_occlusion_intensity")) : 0.5f;
+	const float VignetteIntensity = Args->HasField(TEXT("vignette_intensity")) ? (float)Args->GetNumberField(TEXT("vignette_intensity")) : 0.2f;
+	const float Saturation = Args->HasField(TEXT("saturation")) ? (float)Args->GetNumberField(TEXT("saturation")) : 1.0f;
+	const float Contrast = Args->HasField(TEXT("contrast")) ? (float)Args->GetNumberField(TEXT("contrast")) : 1.0f;
+	const float ColorTemp = Args->HasField(TEXT("color_temp")) ? (float)Args->GetNumberField(TEXT("color_temp")) : 6500.0f;
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString SpawnError;
+	APostProcessVolume* Volume = FindOrSpawnSingletonActor<APostProcessVolume>(
+		World,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		TEXT("AgentForgePostProcess"),
+		SpawnError);
+	if (!Volume)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	Volume->Modify();
+	Volume->bUnbound = true;
+	Volume->Priority = 1000.0f;
+
+	FPostProcessSettings& Settings = Volume->Settings;
+	Settings.bOverride_BloomIntensity = true;
+	Settings.BloomIntensity = BloomIntensity;
+	Settings.bOverride_AutoExposureBias = true;
+	Settings.AutoExposureBias = ExposureCompensation;
+	Settings.bOverride_AmbientOcclusionIntensity = true;
+	Settings.AmbientOcclusionIntensity = AmbientOcclusionIntensity;
+	Settings.bOverride_VignetteIntensity = true;
+	Settings.VignetteIntensity = VignetteIntensity;
+	Settings.bOverride_ColorSaturation = true;
+	Settings.ColorSaturation = FVector4(Saturation, Saturation, Saturation, 1.0f);
+	Settings.bOverride_ColorContrast = true;
+	Settings.ColorContrast = FVector4(Contrast, Contrast, Contrast, 1.0f);
+	Settings.bOverride_WhiteTemp = true;
+	Settings.WhiteTemp = ColorTemp;
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("actor_name"), Volume->GetActorLabel());
+	Root->SetStringField(TEXT("actor_object_path"), Volume->GetPathName());
+	Root->SetNumberField(TEXT("bloom_intensity"), BloomIntensity);
+	Root->SetNumberField(TEXT("exposure_compensation"), ExposureCompensation);
+	Root->SetNumberField(TEXT("ambient_occlusion_intensity"), AmbientOcclusionIntensity);
+	Root->SetNumberField(TEXT("vignette_intensity"), VignetteIntensity);
+	Root->SetNumberField(TEXT("saturation"), Saturation);
+	Root->SetNumberField(TEXT("contrast"), Contrast);
+	Root->SetNumberField(TEXT("color_temp"), ColorTemp);
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_SetSkyAtmosphere(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString Preset = TEXT("default_day");
+	Args->TryGetStringField(TEXT("preset"), Preset);
+	Preset.TrimStartAndEndInline();
+	Preset.ToLowerInline();
+
+	float SunPitch = -45.0f;
+	float SunYaw = 35.0f;
+	float SunIntensity = 10.0f;
+	FLinearColor SunColor(1.0f, 0.98f, 0.95f, 1.0f);
+	float SkyLightIntensity = 1.0f;
+	FLinearColor SkyLightColor(1.0f, 1.0f, 1.0f, 1.0f);
+	FLinearColor LowerHemisphereColor(0.15f, 0.17f, 0.2f, 1.0f);
+	float AtmosphereHeight = 60.0f;
+	float MultiScattering = 1.0f;
+	float RayleighScale = 1.0f;
+	FLinearColor RayleighColor(0.175f, 0.409f, 1.0f, 1.0f);
+	float MieScale = 1.0f;
+	FLinearColor MieColor(1.0f, 0.95f, 0.9f, 1.0f);
+	FLinearColor GroundAlbedo(0.3f, 0.3f, 0.3f, 1.0f);
+
+	if (Preset == TEXT("golden_hour"))
+	{
+		SunPitch = -12.0f;
+		SunYaw = -40.0f;
+		SunIntensity = 7.0f;
+		SunColor = FLinearColor(1.0f, 0.72f, 0.45f, 1.0f);
+		SkyLightIntensity = 0.85f;
+		SkyLightColor = FLinearColor(1.0f, 0.82f, 0.7f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.35f, 0.22f, 0.14f, 1.0f);
+		AtmosphereHeight = 56.0f;
+		MultiScattering = 1.2f;
+		RayleighScale = 0.8f;
+		RayleighColor = FLinearColor(0.35f, 0.28f, 1.0f, 1.0f);
+		MieScale = 1.45f;
+		MieColor = FLinearColor(1.0f, 0.65f, 0.45f, 1.0f);
+		GroundAlbedo = FLinearColor(0.45f, 0.28f, 0.18f, 1.0f);
+	}
+	else if (Preset == TEXT("overcast"))
+	{
+		SunPitch = -58.0f;
+		SunYaw = 10.0f;
+		SunIntensity = 2.5f;
+		SunColor = FLinearColor(0.85f, 0.9f, 1.0f, 1.0f);
+		SkyLightIntensity = 1.35f;
+		SkyLightColor = FLinearColor(0.82f, 0.86f, 0.95f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.22f, 0.24f, 0.27f, 1.0f);
+		AtmosphereHeight = 68.0f;
+		MultiScattering = 1.5f;
+		RayleighScale = 0.55f;
+		RayleighColor = FLinearColor(0.2f, 0.3f, 0.55f, 1.0f);
+		MieScale = 2.2f;
+		MieColor = FLinearColor(0.8f, 0.85f, 0.9f, 1.0f);
+		GroundAlbedo = FLinearColor(0.25f, 0.25f, 0.25f, 1.0f);
+	}
+	else if (Preset == TEXT("night_clear"))
+	{
+		SunPitch = -6.0f;
+		SunYaw = 55.0f;
+		SunIntensity = 0.15f;
+		SunColor = FLinearColor(0.58f, 0.68f, 1.0f, 1.0f);
+		SkyLightIntensity = 0.18f;
+		SkyLightColor = FLinearColor(0.35f, 0.45f, 0.7f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.02f, 0.03f, 0.08f, 1.0f);
+		AtmosphereHeight = 72.0f;
+		MultiScattering = 0.55f;
+		RayleighScale = 0.35f;
+		RayleighColor = FLinearColor(0.08f, 0.12f, 0.4f, 1.0f);
+		MieScale = 0.25f;
+		MieColor = FLinearColor(0.3f, 0.4f, 0.8f, 1.0f);
+		GroundAlbedo = FLinearColor(0.02f, 0.02f, 0.04f, 1.0f);
+	}
+	else if (Preset == TEXT("night_cloudy"))
+	{
+		SunPitch = -4.0f;
+		SunYaw = 20.0f;
+		SunIntensity = 0.05f;
+		SunColor = FLinearColor(0.45f, 0.52f, 0.72f, 1.0f);
+		SkyLightIntensity = 0.1f;
+		SkyLightColor = FLinearColor(0.25f, 0.3f, 0.38f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.03f, 0.03f, 0.05f, 1.0f);
+		AtmosphereHeight = 78.0f;
+		MultiScattering = 0.45f;
+		RayleighScale = 0.22f;
+		RayleighColor = FLinearColor(0.05f, 0.08f, 0.18f, 1.0f);
+		MieScale = 1.3f;
+		MieColor = FLinearColor(0.45f, 0.48f, 0.55f, 1.0f);
+		GroundAlbedo = FLinearColor(0.03f, 0.03f, 0.03f, 1.0f);
+	}
+	else if (Preset == TEXT("stormy"))
+	{
+		SunPitch = -28.0f;
+		SunYaw = -25.0f;
+		SunIntensity = 0.65f;
+		SunColor = FLinearColor(0.7f, 0.78f, 0.95f, 1.0f);
+		SkyLightIntensity = 0.35f;
+		SkyLightColor = FLinearColor(0.35f, 0.42f, 0.5f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.06f, 0.07f, 0.09f, 1.0f);
+		AtmosphereHeight = 82.0f;
+		MultiScattering = 0.8f;
+		RayleighScale = 0.3f;
+		RayleighColor = FLinearColor(0.1f, 0.16f, 0.24f, 1.0f);
+		MieScale = 3.2f;
+		MieColor = FLinearColor(0.55f, 0.6f, 0.66f, 1.0f);
+		GroundAlbedo = FLinearColor(0.06f, 0.06f, 0.07f, 1.0f);
+	}
+	else if (Preset == TEXT("alien_red"))
+	{
+		SunPitch = -18.0f;
+		SunYaw = 100.0f;
+		SunIntensity = 4.0f;
+		SunColor = FLinearColor(1.0f, 0.25f, 0.18f, 1.0f);
+		SkyLightIntensity = 0.9f;
+		SkyLightColor = FLinearColor(0.95f, 0.3f, 0.2f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.25f, 0.04f, 0.03f, 1.0f);
+		AtmosphereHeight = 48.0f;
+		MultiScattering = 1.1f;
+		RayleighScale = 0.95f;
+		RayleighColor = FLinearColor(0.8f, 0.08f, 0.06f, 1.0f);
+		MieScale = 1.8f;
+		MieColor = FLinearColor(1.0f, 0.35f, 0.2f, 1.0f);
+		GroundAlbedo = FLinearColor(0.28f, 0.05f, 0.04f, 1.0f);
+	}
+	else if (Preset == TEXT("alien_green"))
+	{
+		SunPitch = -22.0f;
+		SunYaw = -110.0f;
+		SunIntensity = 4.5f;
+		SunColor = FLinearColor(0.4f, 1.0f, 0.35f, 1.0f);
+		SkyLightIntensity = 0.95f;
+		SkyLightColor = FLinearColor(0.3f, 0.95f, 0.4f, 1.0f);
+		LowerHemisphereColor = FLinearColor(0.04f, 0.2f, 0.06f, 1.0f);
+		AtmosphereHeight = 50.0f;
+		MultiScattering = 1.15f;
+		RayleighScale = 0.9f;
+		RayleighColor = FLinearColor(0.12f, 0.8f, 0.2f, 1.0f);
+		MieScale = 1.7f;
+		MieColor = FLinearColor(0.55f, 1.0f, 0.45f, 1.0f);
+		GroundAlbedo = FLinearColor(0.05f, 0.24f, 0.08f, 1.0f);
+	}
+	else if (Preset != TEXT("default_day"))
+	{
+		return ErrorResponse(TEXT("preset must be one of: default_day, golden_hour, overcast, night_clear, night_cloudy, stormy, alien_red, alien_green."));
+	}
+
+	UWorld* World = GetEditorWorld();
+	if (!World) { return ErrorResponse(TEXT("No editor world.")); }
+
+	FString SpawnError;
+	ASkyAtmosphere* SkyAtmosphereActor = FindOrSpawnSingletonActor<ASkyAtmosphere>(
+		World,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		TEXT("AgentForgeSkyAtmosphere"),
+		SpawnError);
+	if (!SkyAtmosphereActor)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	ASkyLight* SkyLightActor = FindOrSpawnSingletonActor<ASkyLight>(
+		World,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		TEXT("AgentForgeSkyLight"),
+		SpawnError);
+	if (!SkyLightActor)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	ADirectionalLight* SunLightActor = FindOrSpawnSingletonActor<ADirectionalLight>(
+		World,
+		FVector::ZeroVector,
+		FRotator(SunPitch, SunYaw, 0.0f),
+		TEXT("AgentForgeSunLight"),
+		SpawnError);
+	if (!SunLightActor)
+	{
+		return ErrorResponse(SpawnError);
+	}
+
+	USkyAtmosphereComponent* SkyAtmosphereComponent = SkyAtmosphereActor->GetComponent();
+	USkyLightComponent* SkyLightComponent = SkyLightActor->GetLightComponent();
+	UDirectionalLightComponent* DirectionalComponent = SunLightActor->GetComponent();
+	if (!SkyAtmosphereComponent || !SkyLightComponent || !DirectionalComponent)
+	{
+		return ErrorResponse(TEXT("Failed to resolve one or more atmosphere components."));
+	}
+
+	SkyAtmosphereActor->Modify();
+	SkyLightActor->Modify();
+	SunLightActor->Modify();
+	SkyAtmosphereComponent->Modify();
+	SkyLightComponent->Modify();
+	DirectionalComponent->Modify();
+
+	SunLightActor->SetActorRotation(FRotator(SunPitch, SunYaw, 0.0f));
+	DirectionalComponent->SetMobility(EComponentMobility::Movable);
+	DirectionalComponent->SetIntensity(SunIntensity);
+	DirectionalComponent->SetLightColor(SunColor, false);
+
+	SkyLightComponent->SetMobility(EComponentMobility::Movable);
+	SkyLightComponent->SourceType = ESkyLightSourceType::SLS_CapturedScene;
+	SkyLightComponent->bRealTimeCapture = true;
+	SkyLightComponent->bLowerHemisphereIsBlack = true;
+	SkyLightComponent->SetIntensity(SkyLightIntensity);
+	SkyLightComponent->SetLightColor(SkyLightColor);
+	SkyLightComponent->SetLowerHemisphereColor(LowerHemisphereColor);
+
+	SkyAtmosphereComponent->SetAtmosphereHeight(AtmosphereHeight);
+	SkyAtmosphereComponent->SetMultiScatteringFactor(MultiScattering);
+	SkyAtmosphereComponent->SetRayleighScatteringScale(RayleighScale);
+	SkyAtmosphereComponent->SetRayleighScattering(RayleighColor);
+	SkyAtmosphereComponent->SetMieScatteringScale(MieScale);
+	SkyAtmosphereComponent->SetMieScattering(MieColor);
+	SkyAtmosphereComponent->SetGroundAlbedo(GroundAlbedo.ToFColor(true));
+
+	SkyLightComponent->RecaptureSky();
+
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetBoolField(TEXT("ok"), true);
+	Root->SetStringField(TEXT("preset"), Preset);
+	Root->SetStringField(TEXT("sky_atmosphere"), SkyAtmosphereActor->GetActorLabel());
+	Root->SetStringField(TEXT("sky_light"), SkyLightActor->GetActorLabel());
+	Root->SetStringField(TEXT("directional_light"), SunLightActor->GetActorLabel());
+	return ToJsonString(Root);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
 FString UAgentForgeLibrary::Cmd_CreatePillar(const TSharedPtr<FJsonObject>& Args)
 {
 #if WITH_EDITOR
@@ -4878,7 +5723,7 @@ FString UAgentForgeLibrary::Cmd_GetForgeStatus()
 	UVerificationEngine* VE     = UVerificationEngine::Get();
 
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-	Obj->SetStringField(TEXT("version"),                   TEXT("0.1.0"));
+	Obj->SetStringField(TEXT("version"),                   TEXT("0.5.0"));
 	Obj->SetBoolField  (TEXT("constitution_loaded"),       Parser && Parser->IsLoaded());
 	Obj->SetNumberField(TEXT("constitution_rules_loaded"), Parser ? Parser->GetRules().Num() : 0);
 	Obj->SetStringField(TEXT("constitution_path"),         Parser ? Parser->GetConstitutionPath() : TEXT(""));
@@ -5136,6 +5981,171 @@ FString UAgentForgeLibrary::Cmd_LLMStructured(const TSharedPtr<FJsonObject>& Arg
 	if (Response.bSuccess && FJsonSerializer::Deserialize(Reader, StructuredObject) && StructuredObject.IsValid())
 	{
 		Obj->SetObjectField(TEXT("structured"), StructuredObject);
+	}
+
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_LLMStream(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	if (!GEditor) { return ErrorResponse(TEXT("GEditor null.")); }
+
+	FString ProviderString;
+	FString Model;
+	FString SystemPrompt;
+	FString CustomEndpoint;
+	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("provider"), ProviderString))
+	{
+		return ErrorResponse(TEXT("llm_stream requires 'provider'."));
+	}
+	if (!Args->TryGetStringField(TEXT("model"), Model))
+	{
+		return ErrorResponse(TEXT("llm_stream requires 'model'."));
+	}
+	Args->TryGetStringField(TEXT("system"), SystemPrompt);
+	Args->TryGetStringField(TEXT("custom_endpoint"), CustomEndpoint);
+
+	EAgentForgeLLMProvider Provider;
+	if (!ParseLLMProviderName(ProviderString, Provider))
+	{
+		return ErrorResponse(FString::Printf(TEXT("Unknown LLM provider: %s"), *ProviderString));
+	}
+
+	TArray<FAgentForgeChatMessage> Messages;
+	FString ParseError;
+	if (!ParseChatMessages(Args, Messages, ParseError))
+	{
+		return ErrorResponse(ParseError);
+	}
+
+	FAgentForgeLLMSettings Settings;
+	Settings.Provider = Provider;
+	Settings.Model = Model;
+	Settings.SystemPrompt = SystemPrompt;
+	Settings.Messages = Messages;
+	Settings.CustomEndpoint = CustomEndpoint;
+	Settings.bStreamResponse = true;
+	if (Args->HasField(TEXT("max_tokens")))
+	{
+		Settings.MaxTokens = (int32)Args->GetNumberField(TEXT("max_tokens"));
+	}
+	if (Args->HasField(TEXT("temperature")))
+	{
+		Settings.Temperature = (float)Args->GetNumberField(TEXT("temperature"));
+	}
+
+	UAgentForgeLLMSubsystem* LLM = GEditor->GetEditorSubsystem<UAgentForgeLLMSubsystem>();
+	if (!LLM)
+	{
+		return ErrorResponse(TEXT("LLM subsystem unavailable."));
+	}
+
+	const FAgentForgeLLMResponse Response = LLM->SendChatRequestBlocking(Settings);
+	TSharedPtr<FJsonObject> Obj = BuildLLMResponseObject(Response, Provider, Model);
+	Obj->SetBoolField(TEXT("streamed"), true);
+
+	TArray<TSharedPtr<FJsonValue>> ChunkValues;
+	for (const FString& Chunk : ChunkTextForStream(Response.Content))
+	{
+		ChunkValues.Add(MakeShared<FJsonValueString>(Chunk));
+	}
+	Obj->SetNumberField(TEXT("chunk_count"), ChunkValues.Num());
+	Obj->SetArrayField(TEXT("chunks"), ChunkValues);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_VisionAnalyze(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString Prompt = TEXT("Analyze this Unreal Engine level screenshot and describe composition, lighting, atmosphere, set dressing quality, and obvious visual issues.");
+	FString ProviderString;
+	FString Model;
+	if (Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("prompt"), Prompt);
+		Args->TryGetStringField(TEXT("provider"), ProviderString);
+		Args->TryGetStringField(TEXT("model"), Model);
+	}
+
+	const bool bMultiView = Args.IsValid() && Args->HasField(TEXT("multi_view")) && Args->GetBoolField(TEXT("multi_view"));
+	EAgentForgeLLMProvider Provider;
+	FString ResolvedModel;
+	if (!ResolvePreferredVisionProviderAndModel(ProviderString, Model, Provider, ResolvedModel))
+	{
+		return ErrorResponse(TEXT("Unable to resolve a valid vision provider/model."));
+	}
+
+	const FAgentForgeLLMResponse Response = bMultiView
+		? UAgentForgeVisionAnalyzer::AnalyzeMultiViewBlocking(Prompt, Provider, ResolvedModel)
+		: UAgentForgeVisionAnalyzer::AnalyzeViewportBlocking(Prompt, Provider, ResolvedModel);
+
+	TSharedPtr<FJsonObject> Obj = BuildLLMResponseObject(Response, Provider, ResolvedModel);
+	Obj->SetBoolField(TEXT("multi_view"), bMultiView);
+	return ToJsonString(Obj);
+#else
+	return ErrorResponse(TEXT("Editor only."));
+#endif
+}
+
+FString UAgentForgeLibrary::Cmd_VisionQualityScore(const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	FString ProviderString;
+	FString Model;
+	if (Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("provider"), ProviderString);
+		Args->TryGetStringField(TEXT("model"), Model);
+	}
+	const bool bMultiView = Args.IsValid() && Args->HasField(TEXT("multi_view")) && Args->GetBoolField(TEXT("multi_view"));
+
+	EAgentForgeLLMProvider Provider;
+	FString ResolvedModel;
+	if (!ResolvePreferredVisionProviderAndModel(ProviderString, Model, Provider, ResolvedModel))
+	{
+		return ErrorResponse(TEXT("Unable to resolve a valid vision provider/model."));
+	}
+
+	const FAgentForgeLLMResponse Response = UAgentForgeVisionAnalyzer::RequestQualityScoreBlocking(Provider, ResolvedModel, bMultiView);
+	TSharedPtr<FJsonObject> Obj = BuildLLMResponseObject(Response, Provider, ResolvedModel);
+	Obj->SetBoolField(TEXT("multi_view"), bMultiView);
+
+	float Score = 0.0f;
+	FString Feedback;
+	TArray<FString> Issues;
+	TArray<FString> Strengths;
+	if (Response.bSuccess && ParseVisionQualityPayload(Response.Content, Score, Feedback, Issues, Strengths))
+	{
+		Obj->SetNumberField(TEXT("score"), Score);
+		Obj->SetStringField(TEXT("feedback"), Feedback);
+
+		TArray<TSharedPtr<FJsonValue>> IssueValues;
+		for (const FString& Issue : Issues)
+		{
+			IssueValues.Add(MakeShared<FJsonValueString>(Issue));
+		}
+		Obj->SetArrayField(TEXT("issues"), IssueValues);
+
+		TArray<TSharedPtr<FJsonValue>> StrengthValues;
+		for (const FString& Strength : Strengths)
+		{
+			StrengthValues.Add(MakeShared<FJsonValueString>(Strength));
+		}
+		Obj->SetArrayField(TEXT("strengths"), StrengthValues);
+
+		TSharedPtr<FJsonObject> Structured;
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Response.Content);
+		if (FJsonSerializer::Deserialize(Reader, Structured) && Structured.IsValid())
+		{
+			Obj->SetObjectField(TEXT("structured"), Structured);
+		}
 	}
 
 	return ToJsonString(Obj);
@@ -5510,6 +6520,33 @@ FString UAgentForgeLibrary::Cmd_ObserveAnalyzePlanAct(const TSharedPtr<FJsonObje
 		if (Snapshot.IsValid()) { HorrorScore = (float)Snapshot->GetNumberField(TEXT("horror_score")); }
 		IterObj->SetNumberField(TEXT("observed_horror_score"), HorrorScore);
 
+		float VisionScore = -1.0f;
+		float BlendedScore = HorrorScore;
+		FString VisionFeedback;
+		TArray<FString> VisionIssues;
+		TArray<FString> VisionStrengths;
+		EAgentForgeLLMProvider VisionProvider;
+		FString VisionModel;
+		if (ResolvePreferredVisionProviderAndModel(FString(), FString(), VisionProvider, VisionModel))
+		{
+			const FAgentForgeLLMResponse VisionResponse =
+				UAgentForgeVisionAnalyzer::RequestQualityScoreBlocking(VisionProvider, VisionModel, true);
+			if (VisionResponse.bSuccess &&
+				ParseVisionQualityPayload(VisionResponse.Content, VisionScore, VisionFeedback, VisionIssues, VisionStrengths))
+			{
+				BlendedScore = (HorrorScore * 0.4f) + (VisionScore * 0.6f);
+				IterObj->SetStringField(TEXT("vision_provider"), GetLLMProviderName(VisionProvider));
+				IterObj->SetStringField(TEXT("vision_model"), VisionModel);
+				IterObj->SetNumberField(TEXT("vision_score"), VisionScore);
+				IterObj->SetStringField(TEXT("vision_feedback"), VisionFeedback.Left(600));
+			}
+			else if (!VisionResponse.ErrorMessage.IsEmpty())
+			{
+				IterObj->SetStringField(TEXT("vision_error"), VisionResponse.ErrorMessage.Left(240));
+			}
+		}
+		IterObj->SetNumberField(TEXT("blended_score"), BlendedScore);
+
 		// ── Analyze ──────────────────────────────────────────────────────────
 		TArray<FString> Issues;
 		TArray<FString> Plan;
@@ -5540,6 +6577,27 @@ FString UAgentForgeLibrary::Cmd_ObserveAnalyzePlanAct(const TSharedPtr<FJsonObje
 		}
 
 		// ── Act ───────────────────────────────────────────────────────────────
+		for (const FString& VisionIssue : VisionIssues)
+		{
+			if (!VisionIssue.IsEmpty())
+			{
+				Issues.Add(FString::Printf(TEXT("Vision: %s"), *VisionIssue));
+			}
+
+			FString LowerIssue = VisionIssue;
+			LowerIssue.ToLowerInline();
+			if ((LowerIssue.Contains(TEXT("sparse")) || LowerIssue.Contains(TEXT("empty")) || LowerIssue.Contains(TEXT("bare")) || LowerIssue.Contains(TEXT("prop"))) &&
+				!Plan.Contains(TEXT("place_asset_thematically")))
+			{
+				Plan.Add(TEXT("place_asset_thematically"));
+			}
+			if ((LowerIssue.Contains(TEXT("light")) || LowerIssue.Contains(TEXT("readability")) || LowerIssue.Contains(TEXT("atmosphere"))) &&
+				!Plan.Contains(TEXT("apply_genre_rules:horror")))
+			{
+				Plan.Add(TEXT("apply_genre_rules:horror"));
+			}
+		}
+
 		TArray<TSharedPtr<FJsonValue>> ActionResults;
 		for (const FString& PlanStep : Plan)
 		{
@@ -5581,7 +6639,7 @@ FString UAgentForgeLibrary::Cmd_ObserveAnalyzePlanAct(const TSharedPtr<FJsonObje
 		IterLog.Add(MakeShared<FJsonValueObject>(IterObj));
 
 		// ── Check convergence ────────────────────────────────────────────────
-		if (HorrorScore >= ScoreTarget || Plan.IsEmpty()) { break; }
+		if (BlendedScore >= ScoreTarget || Plan.IsEmpty()) { break; }
 	}
 
 	// ── Verify ───────────────────────────────────────────────────────────────

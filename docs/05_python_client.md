@@ -16,9 +16,11 @@ No other dependencies. Python 3.9+ required.
 from ueagentforge_client import AgentForgeClient
 
 client = AgentForgeClient()          # verify=True by default
-print(client.ping())                 # {'pong': 'UEAgentForge v0.1.0', ...}
+print(client.ping())                 # {'pong': 'UEAgentForge v0.5.0', ...}
 print(client.get_forge_status())     # constitution status, version, etc.
 ```
+
+The client also ships repo-local schema helpers that load JSON schemas from `Content/AgentForge/Schemas/` for structured-output workflows.
 
 ## Constructor options
 
@@ -127,6 +129,21 @@ client = AgentForgeClient(timeout=60.0, max_retries=6, retry_backoff_sec=1.0)
 assert client.wait_for_editor(timeout_sec=240.0, poll_sec=2.0)
 ```
 
+## Structured output and vision helpers
+
+```python
+client.load_schema("npc_personality")      # dict
+client.llm_stream(provider, model, messages)  # ForgeResult
+client.llm_structured_from_schema(provider, model, prompt, "level_layout")  # ForgeResult
+client.generate_npc_personality(provider, model, prompt)  # ForgeResult
+client.generate_quest(provider, model, prompt)            # ForgeResult
+client.generate_level_layout(provider, model, prompt)     # ForgeResult
+client.vision_analyze(prompt="", provider="", model="", multi_view=True)    # ForgeResult
+client.vision_quality_score(provider="", model="", multi_view=True)          # ForgeResult
+```
+
+Leave `provider` and `model` blank for the vision helpers if you want the Unreal-side command layer to resolve the preferred vision-capable defaults.
+
 ## All available methods
 
 ### Forge meta
@@ -179,11 +196,16 @@ client.set_actor_mobility(actor_name, mobility)  # ForgeResult
 client.set_actor_visibility(actor_name, visible)  # ForgeResult
 client.group_actors(actor_names, group_name)  # ForgeResult
 client.set_actor_property(actor_name, property_name, value)  # ForgeResult
-client.create_wall(start_x, start_y, end_x, end_y, z=0.0, height=300.0, thickness=20.0, material_path="", label="")  # ForgeResult
-client.create_floor(center_x, center_y, z=0.0, width=400.0, depth=400.0, thickness=10.0, material_path="", label="")  # ForgeResult
-client.create_room(center_x, center_y, z=0.0, width=400.0, depth=400.0, height=300.0, wall_thickness=20.0, floor_material="", wall_material="", label="")  # ForgeResult
-client.create_corridor(start_x, start_y, end_x, end_y, z=0.0, width=220.0, height=300.0, wall_thickness=20.0, include_ceiling=True, floor_material="", wall_material="", label="")  # ForgeResult
+client.create_wall(start_x, start_y, end_x, end_y, height=300.0, thickness=20.0, material_path="", has_windows=False, window_spacing=220.0, window_height=120.0, label="Wall", z=0.0)  # ForgeResult
+client.create_floor(center_x, center_y, z=0.0, width=400.0, length=400.0, thickness=10.0, material_path="", label="Floor")  # ForgeResult
+client.create_room(center_x, center_y, z=0.0, width=400.0, length=400.0, height=300.0, wall_thickness=20.0, floor_material="", wall_material="", ceiling_material="", door_wall="", window_walls=[], label="Room", slab_thickness=10.0)  # ForgeResult
+client.create_corridor(start_x, start_y, end_x, end_y, z=0.0, width=220.0, height=300.0, wall_thickness=20.0, slab_thickness=10.0, has_ceiling=True, floor_material="", wall_material="", label="Corridor")  # ForgeResult
+client.create_staircase(base_x, base_y, base_z, direction, step_count, step_width=150.0, step_depth=30.0, step_height=18.0, material_path="", label="Staircase")  # ForgeResult
 client.create_pillar(x, y, z=0.0, radius=25.0, height=300.0, sides=16, material_path="", label="")  # ForgeResult
+client.scatter_props(mesh_path, center_x, center_y, radius, count, min_scale=0.85, max_scale=1.15, random_rotation=True, snap_to_surface=True, material_path="", label_prefix="ScatterProp", z=0.0)  # ForgeResult
+client.set_fog(density=0.02, height_falloff=0.2, start_distance=0.0, color_r=0.7, color_g=0.75, color_b=0.8)  # ForgeResult
+client.set_post_process(bloom_intensity=0.3, exposure_compensation=0.0, ambient_occlusion_intensity=0.5, vignette_intensity=0.2, saturation=1.0, contrast=1.0, color_temp=6500.0)  # ForgeResult
+client.set_sky_atmosphere(preset="default_day")  # ForgeResult
 client.delete_actor(label)                 # ForgeResult
 client.save_current_level()                # ForgeResult
 ```
@@ -235,6 +257,22 @@ client.get_perf_stats()                     # dict
 ### Scene setup
 ```python
 client.setup_test_level(floor_size)         # ForgeResult
+```
+
+### LLM and vision
+```python
+client.llm_set_key(provider, key)           # ForgeResult
+client.llm_get_models(provider)             # dict
+client.llm_chat(provider, model, messages, system="", max_tokens=1024, temperature=0.7, custom_endpoint="")  # ForgeResult
+client.llm_stream(provider, model, messages, system="", max_tokens=1024, temperature=0.7, custom_endpoint="")  # ForgeResult
+client.llm_structured(provider, model, prompt, schema, system="", max_tokens=1024, temperature=0.2, custom_endpoint="")  # ForgeResult
+client.load_schema(schema_name)             # dict
+client.llm_structured_from_schema(provider, model, prompt, schema_name, system="", max_tokens=1024, temperature=0.2, custom_endpoint="")  # ForgeResult
+client.generate_npc_personality(provider, model, prompt, system="", max_tokens=1024, temperature=0.4, custom_endpoint="")  # ForgeResult
+client.generate_quest(provider, model, prompt, system="", max_tokens=1024, temperature=0.4, custom_endpoint="")  # ForgeResult
+client.generate_level_layout(provider, model, prompt, system="", max_tokens=1400, temperature=0.3, custom_endpoint="")  # ForgeResult
+client.vision_analyze(prompt="", provider="", model="", multi_view=False)  # ForgeResult
+client.vision_quality_score(provider="", model="", multi_view=False)        # ForgeResult
 ```
 
 ### Generic

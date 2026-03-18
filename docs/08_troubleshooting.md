@@ -112,6 +112,29 @@ Actor labels are editor display names and can change. Use `object_path` for `set
 
 **Fix:** Call `compile_blueprint` first, then retry `set_bp_cdo_property`.
 
+### `{"error": "No API key configured for the selected provider."}`
+
+**Cause:** An LLM or vision command targeted a provider that has no runtime key set in the active editor session.
+
+**Fix:**
+1. Set a key at runtime with `llm_set_key`
+2. Or export one of these environment variables before launching Unreal:
+   - `AGENTFORGE_ANTHROPIC_KEY`
+   - `AGENTFORGE_OPENAI_KEY`
+   - `AGENTFORGE_DEEPSEEK_KEY`
+   - `AGENTFORGE_CUSTOM_KEY`
+3. Retry `llm_chat`, `llm_stream`, `llm_structured`, `vision_analyze`, or `vision_quality_score`
+
+### `{"error": "Timed out waiting for screenshot capture."}`
+
+**Cause:** The active editor viewport did not produce a screenshot quickly enough for the vision pass.
+
+**Fix:**
+1. Confirm the editor is running with a normal render-capable viewport
+2. Call `redraw_viewports` or move the editor camera once before retrying
+3. Avoid `-NullRHI` for live vision validation; use a normal editor session or `agent/tools/launch_runtime_host.ps1`
+4. Check that `C:/HGShots/` is writable
+
 ---
 
 ## Verification failures

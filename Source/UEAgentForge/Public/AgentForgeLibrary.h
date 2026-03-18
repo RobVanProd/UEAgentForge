@@ -6,7 +6,7 @@
 #include "AgentForgeLibrary.generated.h"
 
 /**
- * UEAgentForge v0.1.0 — Enterprise-grade AI agent command surface.
+ * UEAgentForge v0.5.0 — Enterprise-grade AI agent command surface.
  *
  * All commands are available via the Unreal Remote Control API:
  *   PUT http://127.0.0.1:30010/remote/object/call
@@ -286,7 +286,12 @@ private:
 	static FString Cmd_CreateFloor(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_CreateRoom(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_CreateCorridor(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_CreateStaircase(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_CreatePillar(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_ScatterProps(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetFog(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetPostProcess(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_SetSkyAtmosphere(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_DeleteActor(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_SaveCurrentLevel();
 	static FString Cmd_TakeScreenshot(const TSharedPtr<FJsonObject>& Args);
@@ -333,9 +338,12 @@ private:
 	// ─── Scene setup ──────────────────────────────────────────────────────────
 	static FString Cmd_SetupTestLevel(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_LLMChat(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_LLMStream(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_LLMStructured(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_LLMSetKey(const TSharedPtr<FJsonObject>& Args);
 	static FString Cmd_LLMGetModels(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_VisionAnalyze(const TSharedPtr<FJsonObject>& Args);
+	static FString Cmd_VisionQualityScore(const TSharedPtr<FJsonObject>& Args);
 
 	// ─── v0.2.0 Unified Orchestration ─────────────────────────────────────────
 	// enhance_current_level: analyze composition + spatial placement + verification + screenshot

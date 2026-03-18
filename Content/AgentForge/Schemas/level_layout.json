@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "properties": {
+    "theme": { "type": "string" },
+    "summary": { "type": "string" },
+    "pacing_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "rooms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "purpose": { "type": "string" },
+          "size_category": {
+            "type": "string",
+            "enum": ["small", "medium", "large", "setpiece"]
+          },
+          "connections": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "focal_points": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "props": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "lighting_notes": { "type": "string" }
+        },
+        "required": [
+          "name",
+          "purpose",
+          "size_category",
+          "connections",
+          "focal_points",
+          "props",
+          "lighting_notes"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["theme", "summary", "pacing_notes", "rooms"],
+  "additionalProperties": false
+}

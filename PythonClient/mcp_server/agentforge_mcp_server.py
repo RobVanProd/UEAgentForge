@@ -504,6 +504,34 @@ def create_corridor(
 
 
 @mcp.tool()
+def create_staircase(
+    base_x: float,
+    base_y: float,
+    base_z: float,
+    direction: str,
+    step_count: int,
+    step_width: float = 150.0,
+    step_depth: float = 30.0,
+    step_height: float = 18.0,
+    material_path: str = "",
+    label: str = "Staircase",
+) -> Dict[str, Any]:
+    """Create a staircase from repeated step blocks. Direction must be north, south, east, or west. Standard story stairs use roughly 16-18 steps at 17-19cm rise each."""
+    return _ensure_ok(get_client().create_staircase(
+        base_x=base_x,
+        base_y=base_y,
+        base_z=base_z,
+        direction=direction,
+        step_count=step_count,
+        step_width=step_width,
+        step_depth=step_depth,
+        step_height=step_height,
+        material_path=material_path,
+        label=label,
+    ))
+
+
+@mcp.tool()
 def create_pillar(
     x: float,
     y: float,
@@ -525,6 +553,86 @@ def create_pillar(
         material_path=material_path,
         label=label,
     ))
+
+
+@mcp.tool()
+def scatter_props(
+    mesh_path: str,
+    center_x: float,
+    center_y: float,
+    radius: float,
+    count: int,
+    min_scale: float = 0.85,
+    max_scale: float = 1.15,
+    random_rotation: bool = True,
+    snap_to_surface: bool = True,
+    material_path: str = "",
+    label_prefix: str = "ScatterProp",
+    z: float = 0.0,
+) -> Dict[str, Any]:
+    """Scatter repeated mesh props inside a radius with randomized placement and scale. Use this for rocks, debris, crates, vegetation clumps, or loose furniture around a focal point."""
+    return _ensure_ok(get_client().scatter_props(
+        mesh_path=mesh_path,
+        center_x=center_x,
+        center_y=center_y,
+        radius=radius,
+        count=count,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        random_rotation=random_rotation,
+        snap_to_surface=snap_to_surface,
+        material_path=material_path,
+        label_prefix=label_prefix,
+        z=z,
+    ))
+
+
+@mcp.tool()
+def set_fog(
+    density: float = 0.02,
+    height_falloff: float = 0.2,
+    start_distance: float = 0.0,
+    color_r: float = 0.7,
+    color_g: float = 0.75,
+    color_b: float = 0.8,
+) -> Dict[str, Any]:
+    """Configure or create exponential height fog for depth and atmosphere. Density around 0.02 is light haze, 0.05 is noticeable fog, and higher values become heavy mood fog quickly."""
+    return _ensure_ok(get_client().set_fog(
+        density=density,
+        height_falloff=height_falloff,
+        start_distance=start_distance,
+        color_r=color_r,
+        color_g=color_g,
+        color_b=color_b,
+    ))
+
+
+@mcp.tool()
+def set_post_process(
+    bloom_intensity: float = 0.3,
+    exposure_compensation: float = 0.0,
+    ambient_occlusion_intensity: float = 0.5,
+    vignette_intensity: float = 0.2,
+    saturation: float = 1.0,
+    contrast: float = 1.0,
+    color_temp: float = 6500.0,
+) -> Dict[str, Any]:
+    """Configure the global unbound post-process volume. Use this after layout and lighting to push exposure, bloom, vignette, saturation, contrast, and overall warmth or coolness."""
+    return _ensure_ok(get_client().set_post_process(
+        bloom_intensity=bloom_intensity,
+        exposure_compensation=exposure_compensation,
+        ambient_occlusion_intensity=ambient_occlusion_intensity,
+        vignette_intensity=vignette_intensity,
+        saturation=saturation,
+        contrast=contrast,
+        color_temp=color_temp,
+    ))
+
+
+@mcp.tool()
+def set_sky_atmosphere(preset: str = "default_day") -> Dict[str, Any]:
+    """Apply a whole-scene sky preset. Options are default_day, golden_hour, overcast, night_clear, night_cloudy, stormy, alien_red, and alien_green."""
+    return _ensure_ok(get_client().set_sky_atmosphere(preset=preset))
 
 
 @mcp.tool()
@@ -608,6 +716,28 @@ def llm_chat(
 
 
 @mcp.tool()
+def llm_stream(
+    provider: str,
+    model: str,
+    messages: List[Dict[str, Any]],
+    system: str = "",
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    custom_endpoint: str = "",
+) -> Dict[str, Any]:
+    """Request a stream-compatible response shape. UEAgentForge currently returns chunked compatibility output so MCP hosts can consume incremental-style payloads without custom transport glue."""
+    return _ensure_ok(get_client().llm_stream(
+        provider=provider,
+        model=model,
+        messages=messages,
+        system=system,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        custom_endpoint=custom_endpoint,
+    ))
+
+
+@mcp.tool()
 def llm_structured(
     provider: str,
     model: str,
@@ -629,6 +759,102 @@ def llm_structured(
         "temperature": temperature,
         "custom_endpoint": custom_endpoint,
     }))
+
+
+@mcp.tool()
+def generate_npc_personality(
+    provider: str,
+    model: str,
+    prompt: str,
+    system: str = "",
+    max_tokens: int = 1024,
+    temperature: float = 0.4,
+    custom_endpoint: str = "",
+) -> Dict[str, Any]:
+    """Generate a structured NPC personality payload using the bundled npc_personality schema."""
+    return _ensure_ok(get_client().generate_npc_personality(
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        system=system,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        custom_endpoint=custom_endpoint,
+    ))
+
+
+@mcp.tool()
+def generate_quest(
+    provider: str,
+    model: str,
+    prompt: str,
+    system: str = "",
+    max_tokens: int = 1024,
+    temperature: float = 0.4,
+    custom_endpoint: str = "",
+) -> Dict[str, Any]:
+    """Generate a structured quest payload using the bundled quest_structure schema."""
+    return _ensure_ok(get_client().generate_quest(
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        system=system,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        custom_endpoint=custom_endpoint,
+    ))
+
+
+@mcp.tool()
+def generate_level_layout(
+    provider: str,
+    model: str,
+    prompt: str,
+    system: str = "",
+    max_tokens: int = 1400,
+    temperature: float = 0.3,
+    custom_endpoint: str = "",
+) -> Dict[str, Any]:
+    """Generate a structured room or level layout plan using the bundled level_layout schema."""
+    return _ensure_ok(get_client().generate_level_layout(
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        system=system,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        custom_endpoint=custom_endpoint,
+    ))
+
+
+@mcp.tool()
+def vision_analyze(
+    prompt: str = "",
+    provider: str = "",
+    model: str = "",
+    multi_view: bool = False,
+) -> Dict[str, Any]:
+    """Analyze the active Unreal viewport or a four-angle capture set through a multimodal model. Leave provider/model blank to use the editor's preferred vision-capable defaults."""
+    return _ensure_ok(get_client().vision_analyze(
+        prompt=prompt,
+        provider=provider,
+        model=model,
+        multi_view=multi_view,
+    ))
+
+
+@mcp.tool()
+def vision_quality_score(
+    provider: str = "",
+    model: str = "",
+    multi_view: bool = False,
+) -> Dict[str, Any]:
+    """Score the current scene from 0 to 100 with structured feedback, issues, and strengths. This is the vision loop used by higher-level OAPA refinement."""
+    return _ensure_ok(get_client().vision_quality_score(
+        provider=provider,
+        model=model,
+        multi_view=multi_view,
+    ))
 
 
 @mcp.tool()

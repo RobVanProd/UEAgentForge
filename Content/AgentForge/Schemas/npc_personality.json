@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "role": { "type": "string" },
+    "archetype": { "type": "string" },
+    "background": { "type": "string" },
+    "motivation": { "type": "string" },
+    "fear": { "type": "string" },
+    "speech_style": { "type": "string" },
+    "quirks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "goals": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "relationship_hooks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "name",
+    "role",
+    "archetype",
+    "background",
+    "motivation",
+    "fear",
+    "speech_style",
+    "quirks",
+    "goals",
+    "relationship_hooks"
+  ],
+  "additionalProperties": false
+}

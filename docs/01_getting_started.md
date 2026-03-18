@@ -88,8 +88,8 @@ You should see:
 
 ```json
 {
-  "pong": "UEAgentForge v0.1.0",
-  "version": "0.1.0",
+  "pong": "UEAgentForge v0.5.0",
+  "version": "0.5.0",
   "constitution_loaded": true,
   "constitution_rules": 12
 }

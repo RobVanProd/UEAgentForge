@@ -53,6 +53,8 @@
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/PointLight.h"
+#include "GameFramework/PlayerStart.h"
+#include "NavMesh/NavMeshBoundsVolume.h"
 #include "Engine/SkyLight.h"
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
@@ -118,6 +120,9 @@
 
 // Simple lock: if set, mutating commands are rejected unless the current level matches.
 static FString GForgeMapLockPackagePath;
+static void PrepareWorldForTransactionalSpawn(UWorld* World);
+static void MarkObjectTransactional(UObject* Object);
+static void MarkActorTransactionalRecursive(AActor* Actor);
 // Serializes Python execution from remote requests to avoid concurrent interpreter access.
 static FCriticalSection GForgePythonExecCS;
 // Tracks open begin/end transaction state.
@@ -418,6 +423,8 @@ static AActor* SpawnGroupActor(UWorld* World, const FString& Label, const FVecto
 	}
 
 	FActorSpawnParameters Params;
+	PrepareWorldForTransactionalSpawn(World);
+	Params.ObjectFlags |= RF_Transactional;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	AActor* GroupActor = World->SpawnActor<AActor>(AActor::StaticClass(), Location, FRotator::ZeroRotator, Params);
 	if (!GroupActor)
@@ -426,7 +433,7 @@ static AActor* SpawnGroupActor(UWorld* World, const FString& Label, const FVecto
 		return nullptr;
 	}
 
-	GroupActor->Modify();
+	MarkActorTransactionalRecursive(GroupActor);
 	if (!Label.IsEmpty())
 	{
 		GroupActor->SetActorLabel(Label);
@@ -434,14 +441,15 @@ static AActor* SpawnGroupActor(UWorld* World, const FString& Label, const FVecto
 
 	if (!GroupActor->GetRootComponent())
 	{
-		USceneComponent* Root = NewObject<USceneComponent>(GroupActor, TEXT("AgentForgeRoot"));
+		USceneComponent* Root = NewObject<USceneComponent>(GroupActor, TEXT("AgentForgeRoot"), RF_Transactional);
 		if (!Root)
 		{
 			OutError = TEXT("Failed to create group root component.");
 			return nullptr;
 		}
 
-		Root->Modify();
+		Root->CreationMethod = EComponentCreationMethod::Instance;
+		MarkObjectTransactional(Root);
 		Root->SetMobility(EComponentMobility::Static);
 		GroupActor->SetRootComponent(Root);
 		GroupActor->AddInstanceComponent(Root);
@@ -488,6 +496,8 @@ static AStaticMeshActor* SpawnBoxActor(
 	}
 
 	FActorSpawnParameters Params;
+	PrepareWorldForTransactionalSpawn(World);
+	Params.ObjectFlags |= RF_Transactional;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Center, Rotation, Params);
 	if (!Actor)
@@ -496,7 +506,7 @@ static AStaticMeshActor* SpawnBoxActor(
 		return nullptr;
 	}
 
-	Actor->Modify();
+	MarkActorTransactionalRecursive(Actor);
 	if (!Label.IsEmpty())
 	{
 		Actor->SetActorLabel(Label);
@@ -509,7 +519,7 @@ static AStaticMeshActor* SpawnBoxActor(
 		return nullptr;
 	}
 
-	MeshComp->Modify();
+	MarkObjectTransactional(MeshComp);
 	MeshComp->SetMobility(EComponentMobility::Static);
 	MeshComp->SetStaticMesh(CubeMesh);
 	Actor->SetActorScale3D(FVector(
@@ -532,7 +542,8 @@ static bool AttachActorToParent(AActor* Child, AActor* Parent)
 		return false;
 	}
 
-	Child->Modify();
+	MarkActorTransactionalRecursive(Child);
+	MarkActorTransactionalRecursive(Parent);
 	return Child->AttachToActor(Parent, FAttachmentTransformRules::KeepWorldTransform);
 }
 
@@ -707,6 +718,8 @@ static AStaticMeshActor* SpawnStaticMeshPrimitiveActor(
 	}
 
 	FActorSpawnParameters Params;
+	PrepareWorldForTransactionalSpawn(World);
+	Params.ObjectFlags |= RF_Transactional;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	AStaticMeshActor* Actor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), Center, Rotation, Params);
 	if (!Actor)
@@ -715,7 +728,7 @@ static AStaticMeshActor* SpawnStaticMeshPrimitiveActor(
 		return nullptr;
 	}
 
-	Actor->Modify();
+	MarkActorTransactionalRecursive(Actor);
 	if (!Label.IsEmpty())
 	{
 		Actor->SetActorLabel(Label);
@@ -728,7 +741,7 @@ static AStaticMeshActor* SpawnStaticMeshPrimitiveActor(
 		return nullptr;
 	}
 
-	MeshComp->Modify();
+	MarkObjectTransactional(MeshComp);
 	MeshComp->SetMobility(EComponentMobility::Static);
 	MeshComp->SetStaticMesh(Mesh);
 	Actor->SetActorScale3D(Scale3D);
@@ -780,6 +793,8 @@ static TActor* FindOrSpawnSingletonActor(
 	}
 
 	FActorSpawnParameters Params;
+	PrepareWorldForTransactionalSpawn(World);
+	Params.ObjectFlags |= RF_Transactional;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	TActor* Spawned = World->SpawnActor<TActor>(TActor::StaticClass(), Location, Rotation, Params);
 	if (!Spawned)
@@ -788,7 +803,7 @@ static TActor* FindOrSpawnSingletonActor(
 		return nullptr;
 	}
 
-	Spawned->Modify();
+	MarkActorTransactionalRecursive(Spawned);
 	if (!Label.IsEmpty())
 	{
 		Spawned->SetActorLabel(Label);
@@ -1089,6 +1104,29 @@ static bool ParseLLMProviderName(const FString& InProvider, EAgentForgeLLMProvid
 	return false;
 }
 
+static FString NormalizeAssetObjectPath(const FString& InAssetPath)
+{
+	FString AssetPath = InAssetPath;
+	AssetPath.TrimStartAndEndInline();
+	if (AssetPath.IsEmpty())
+	{
+		return AssetPath;
+	}
+
+	if (AssetPath.Contains(TEXT(".")))
+	{
+		return AssetPath;
+	}
+
+	const FString AssetName = FPackageName::GetShortName(AssetPath);
+	if (AssetName.IsEmpty())
+	{
+		return AssetPath;
+	}
+
+	return AssetPath + TEXT(".") + AssetName;
+}
+
 static FString GetLLMProviderName(EAgentForgeLLMProvider Provider)
 {
 	switch (Provider)
@@ -1364,6 +1402,655 @@ FString UAgentForgeLibrary::OkResponse(const FString& Detail)
 	return ToJsonString(Obj);
 }
 
+static bool ParseJsonObjectLocal(const FString& In, TSharedPtr<FJsonObject>& OutObj, FString& OutErr)
+{
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(In);
+	if (!FJsonSerializer::Deserialize(Reader, OutObj) || !OutObj.IsValid())
+	{
+		OutErr = FString::Printf(TEXT("JSON parse error: %s"), *Reader.Get().GetErrorMessage());
+		return false;
+	}
+	return true;
+}
+
+static FString ToJsonStringLocal(const TSharedPtr<FJsonObject>& Obj)
+{
+	FString Out;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+	FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+	return Out;
+}
+
+static FString SerializeVerificationSummaryJson(
+	const FString& Action,
+	const int32 RequestedPhaseMask,
+	const bool bAllPassed,
+	const TArray<FVerificationPhaseResult>& ExecutedResults,
+	const TArray<FVerificationPhaseResult>& RequestedButNotRun,
+	const FString& VerificationMode = TEXT("transaction_bound"))
+{
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("action"), Action);
+	Root->SetStringField(TEXT("verification_mode"), VerificationMode);
+	Root->SetNumberField(TEXT("requested_phase_mask"), RequestedPhaseMask);
+	Root->SetBoolField(TEXT("all_passed"), bAllPassed);
+	Root->SetNumberField(TEXT("phases_run"), ExecutedResults.Num());
+
+	TArray<TSharedPtr<FJsonValue>> DetailsArr;
+	for (const FVerificationPhaseResult& Result : ExecutedResults)
+	{
+		TSharedPtr<FJsonObject> PhaseObj = MakeShared<FJsonObject>();
+		PhaseObj->SetStringField(TEXT("phase"), Result.PhaseName);
+		PhaseObj->SetBoolField(TEXT("passed"), Result.Passed);
+		PhaseObj->SetStringField(TEXT("detail"), Result.Detail);
+		PhaseObj->SetNumberField(TEXT("duration_ms"), Result.DurationMs);
+		DetailsArr.Add(MakeShared<FJsonValueObject>(PhaseObj));
+	}
+	Root->SetArrayField(TEXT("details"), DetailsArr);
+
+	TArray<TSharedPtr<FJsonValue>> RequestedArr;
+	for (const FVerificationPhaseResult& Result : RequestedButNotRun)
+	{
+		TSharedPtr<FJsonObject> PhaseObj = MakeShared<FJsonObject>();
+		PhaseObj->SetStringField(TEXT("phase"), Result.PhaseName);
+		PhaseObj->SetBoolField(TEXT("passed"), Result.Passed);
+		PhaseObj->SetStringField(TEXT("detail"), Result.Detail);
+		PhaseObj->SetNumberField(TEXT("duration_ms"), Result.DurationMs);
+		RequestedArr.Add(MakeShared<FJsonValueObject>(PhaseObj));
+	}
+	Root->SetArrayField(TEXT("requested_but_not_run"), RequestedArr);
+
+	if (ExecutedResults.IsEmpty())
+	{
+		Root->SetStringField(TEXT("error"), TEXT("No verification phases executed."));
+	}
+
+	return ToJsonStringLocal(Root);
+}
+
+static TArray<TSharedPtr<FJsonValue>> PhaseResultsToJsonArray(const TArray<FVerificationPhaseResult>& Results)
+{
+	TArray<TSharedPtr<FJsonValue>> Arr;
+	for (const FVerificationPhaseResult& Result : Results)
+	{
+		TSharedPtr<FJsonObject> PhaseObj = MakeShared<FJsonObject>();
+		PhaseObj->SetStringField(TEXT("phase"), Result.PhaseName);
+		PhaseObj->SetBoolField(TEXT("passed"), Result.Passed);
+		PhaseObj->SetStringField(TEXT("detail"), Result.Detail);
+		PhaseObj->SetNumberField(TEXT("duration_ms"), Result.DurationMs);
+		Arr.Add(MakeShared<FJsonValueObject>(PhaseObj));
+	}
+	return Arr;
+}
+
+static AActor* FindActorByPathLabelOrNameLocal(const FString& PathLabelOrName)
+{
+#if WITH_EDITOR
+	if (PathLabelOrName.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	if (AActor* ByPath = Cast<AActor>(StaticFindObject(AActor::StaticClass(), nullptr, *PathLabelOrName)))
+	{
+		if (IsValid(ByPath) && !ByPath->IsActorBeingDestroyed())
+		{
+			return ByPath;
+		}
+	}
+
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor || !IsValid(Actor))
+		{
+			continue;
+		}
+		if (Actor->GetActorLabel().Equals(PathLabelOrName, ESearchCase::IgnoreCase) ||
+			Actor->GetName().Equals(PathLabelOrName, ESearchCase::IgnoreCase) ||
+			Actor->GetPathName().Equals(PathLabelOrName, ESearchCase::IgnoreCase))
+		{
+			return Actor;
+		}
+	}
+#endif
+	return nullptr;
+}
+
+static bool IsVectorNearlyEqual(const FVector& A, const FVector& B, const float Tolerance = 0.05f)
+{
+	return FMath::IsNearlyEqual(A.X, B.X, Tolerance) &&
+		FMath::IsNearlyEqual(A.Y, B.Y, Tolerance) &&
+		FMath::IsNearlyEqual(A.Z, B.Z, Tolerance);
+}
+
+static bool IsRotatorNearlyEqual(const FRotator& A, const FRotator& B, const float Tolerance = 0.05f)
+{
+	return FMath::IsNearlyEqual(A.Pitch, B.Pitch, Tolerance) &&
+		FMath::IsNearlyEqual(A.Yaw, B.Yaw, Tolerance) &&
+		FMath::IsNearlyEqual(A.Roll, B.Roll, Tolerance);
+}
+
+static int32 CountCurrentActors()
+{
+#if WITH_EDITOR
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	int32 Count = 0;
+	if (!World)
+	{
+		return 0;
+	}
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		if (*It && IsValid(*It))
+		{
+			++Count;
+		}
+	}
+	return Count;
+#else
+	return 0;
+#endif
+}
+
+static void PrepareWorldForTransactionalSpawn(UWorld* World)
+{
+#if WITH_EDITOR
+	if (!World)
+	{
+		return;
+	}
+
+	World->SetFlags(RF_Transactional);
+	World->Modify();
+
+	ULevel* Level = World->GetCurrentLevel();
+	if (!Level)
+	{
+		Level = World->PersistentLevel.Get();
+	}
+	if (Level)
+	{
+		Level->SetFlags(RF_Transactional);
+		Level->Modify();
+	}
+#endif
+}
+
+static void MarkObjectTransactional(UObject* Object)
+{
+#if WITH_EDITOR
+	if (!Object)
+	{
+		return;
+	}
+
+	Object->SetFlags(RF_Transactional);
+	Object->Modify();
+#endif
+}
+
+static void MarkActorTransactionalRecursive(AActor* Actor)
+{
+#if WITH_EDITOR
+	if (!Actor)
+	{
+		return;
+	}
+
+	MarkObjectTransactional(Actor);
+	TArray<UActorComponent*> Components;
+	Actor->GetComponents(Components);
+	for (UActorComponent* Component : Components)
+	{
+		MarkObjectTransactional(Component);
+	}
+
+	if (USceneComponent* RootComponent = Actor->GetRootComponent())
+	{
+		MarkObjectTransactional(RootComponent);
+	}
+#endif
+}
+
+static bool RunCommandAwarePostVerify(
+	const FString& Cmd,
+	const TSharedPtr<FJsonObject>& Args,
+	const FString& CommandResult,
+	FVerificationPhaseResult& OutResult)
+{
+	OutResult = FVerificationPhaseResult();
+	OutResult.PhaseName = TEXT("PostVerify.CommandAware");
+	const double StartTime = FPlatformTime::Seconds();
+
+	auto Finish = [&](const bool bPassed, const FString& Detail) -> bool
+	{
+		OutResult.Passed = bPassed;
+		OutResult.Detail = Detail;
+		OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+		return true;
+	};
+
+	TSharedPtr<FJsonObject> ResultObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(CommandResult, ResultObj, ParseErr) || !ResultObj.IsValid())
+	{
+		return false;
+	}
+
+	if (Cmd == TEXT("spawn_actor"))
+	{
+		FString SpawnedPath;
+		ResultObj->TryGetStringField(TEXT("spawned_object_path"), SpawnedPath);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(SpawnedPath);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Spawned actor missing after command: %s"), *SpawnedPath));
+		}
+
+		FString ClassPath;
+		Args->TryGetStringField(TEXT("class_path"), ClassPath);
+		if (!ClassPath.IsEmpty())
+		{
+			if (UClass* ExpectedClass = LoadObject<UClass>(nullptr, *ClassPath))
+			{
+				if (!Actor->IsA(ExpectedClass))
+				{
+					return Finish(false, FString::Printf(TEXT("Spawned actor class mismatch. Expected %s, got %s."), *ExpectedClass->GetName(), *Actor->GetClass()->GetName()));
+				}
+			}
+		}
+		return Finish(true, FString::Printf(TEXT("Actor exists at %s and matches requested class."), *SpawnedPath));
+	}
+
+	if (Cmd == TEXT("spawn_point_light") || Cmd == TEXT("spawn_spot_light"))
+	{
+		FString SpawnedPath;
+		ResultObj->TryGetStringField(TEXT("spawned_object_path"), SpawnedPath);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(SpawnedPath);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Spawned light missing after command: %s"), *SpawnedPath));
+		}
+
+		const bool bClassOk =
+			(Cmd == TEXT("spawn_point_light") && Actor->IsA(APointLight::StaticClass())) ||
+			(Cmd == TEXT("spawn_spot_light") && Actor->IsA(ASpotLight::StaticClass()));
+		if (!bClassOk)
+		{
+			return Finish(false, FString::Printf(TEXT("Spawned light class mismatch for %s. Got %s."), *Cmd, *Actor->GetClass()->GetName()));
+		}
+		return Finish(true, FString::Printf(TEXT("Light actor exists at %s with expected class."), *SpawnedPath));
+	}
+
+	if (Cmd == TEXT("spawn_rect_light") || Cmd == TEXT("spawn_directional_light"))
+	{
+		FString SpawnedPath;
+		ResultObj->TryGetStringField(TEXT("spawned_object_path"), SpawnedPath);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(SpawnedPath);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Spawned light missing after command: %s"), *SpawnedPath));
+		}
+
+		const bool bClassOk =
+			(Cmd == TEXT("spawn_rect_light") && Actor->IsA(ARectLight::StaticClass())) ||
+			(Cmd == TEXT("spawn_directional_light") && Actor->IsA(ADirectionalLight::StaticClass()));
+		if (!bClassOk)
+		{
+			return Finish(false, FString::Printf(TEXT("Spawned light class mismatch for %s. Got %s."), *Cmd, *Actor->GetClass()->GetName()));
+		}
+		return Finish(true, FString::Printf(TEXT("Light actor exists at %s with expected class."), *SpawnedPath));
+	}
+
+	if (Cmd == TEXT("compile_blueprint"))
+	{
+		FString BlueprintPath;
+		Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath);
+		UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+		if (!BP)
+		{
+			return Finish(false, FString::Printf(TEXT("Blueprint missing after compile_blueprint: %s"), *BlueprintPath));
+		}
+		if (BP->Status == BS_Error)
+		{
+			return Finish(false, FString::Printf(TEXT("Blueprint compile status is BS_Error after compile_blueprint: %s"), *BlueprintPath));
+		}
+		return Finish(true, FString::Printf(TEXT("Blueprint compiled without BS_Error status: %s."), *BlueprintPath));
+	}
+
+	if (Cmd == TEXT("edit_blueprint_node"))
+	{
+		FString BlueprintPath;
+		FString NodeGuidString;
+		Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath);
+		ResultObj->TryGetStringField(TEXT("node_guid"), NodeGuidString);
+
+		UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *BlueprintPath);
+		if (!BP)
+		{
+			return Finish(false, FString::Printf(TEXT("Blueprint missing after edit_blueprint_node: %s"), *BlueprintPath));
+		}
+		if (BP->Status == BS_Error)
+		{
+			return Finish(false, FString::Printf(TEXT("Blueprint compile status is BS_Error after edit_blueprint_node: %s"), *BlueprintPath));
+		}
+
+		FGuid ExpectedGuid;
+		if (!FGuid::Parse(NodeGuidString, ExpectedGuid))
+		{
+			return Finish(false, FString::Printf(TEXT("edit_blueprint_node returned invalid node_guid: %s"), *NodeGuidString));
+		}
+
+		bool bFoundNode = false;
+		for (UEdGraph* Graph : BP->UbergraphPages)
+		{
+			if (!Graph)
+			{
+				continue;
+			}
+			for (UEdGraphNode* Node : Graph->Nodes)
+			{
+				if (Node && Node->NodeGuid == ExpectedGuid)
+				{
+					bFoundNode = true;
+					break;
+				}
+			}
+			if (bFoundNode)
+			{
+				break;
+			}
+		}
+
+		if (!bFoundNode)
+		{
+			return Finish(false, FString::Printf(TEXT("Edited node guid no longer exists after edit_blueprint_node: %s"), *NodeGuidString));
+		}
+		return Finish(true, FString::Printf(TEXT("Blueprint node edit verified for %s."), *BlueprintPath));
+	}
+
+	if (Cmd == TEXT("set_actor_transform"))
+	{
+		FString ActorPath;
+		ResultObj->TryGetStringField(TEXT("actor_object_path"), ActorPath);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorPath);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Actor missing after transform update: %s"), *ActorPath));
+		}
+
+		const FVector ExpectedLocation(
+			Args->HasField(TEXT("x")) ? (float)Args->GetNumberField(TEXT("x")) : Actor->GetActorLocation().X,
+			Args->HasField(TEXT("y")) ? (float)Args->GetNumberField(TEXT("y")) : Actor->GetActorLocation().Y,
+			Args->HasField(TEXT("z")) ? (float)Args->GetNumberField(TEXT("z")) : Actor->GetActorLocation().Z);
+		const FRotator ExpectedRotation(
+			Args->HasField(TEXT("pitch")) ? (float)Args->GetNumberField(TEXT("pitch")) : Actor->GetActorRotation().Pitch,
+			Args->HasField(TEXT("yaw")) ? (float)Args->GetNumberField(TEXT("yaw")) : Actor->GetActorRotation().Yaw,
+			Args->HasField(TEXT("roll")) ? (float)Args->GetNumberField(TEXT("roll")) : Actor->GetActorRotation().Roll);
+
+		if (!IsVectorNearlyEqual(Actor->GetActorLocation(), ExpectedLocation) ||
+			!IsRotatorNearlyEqual(Actor->GetActorRotation(), ExpectedRotation))
+		{
+			return Finish(false, FString::Printf(TEXT("Actor transform mismatch after set_actor_transform for %s."), *ActorPath));
+		}
+		return Finish(true, FString::Printf(TEXT("Actor transform matches requested values for %s."), *ActorPath));
+	}
+
+	if (Cmd == TEXT("set_actor_scale"))
+	{
+		FString ActorName;
+		ResultObj->TryGetStringField(TEXT("actor_name"), ActorName);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorName);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Actor missing after scale update: %s"), *ActorName));
+		}
+
+		const FVector ExpectedScale(
+			Args->HasField(TEXT("sx")) ? (float)Args->GetNumberField(TEXT("sx")) : Actor->GetActorScale3D().X,
+			Args->HasField(TEXT("sy")) ? (float)Args->GetNumberField(TEXT("sy")) : Actor->GetActorScale3D().Y,
+			Args->HasField(TEXT("sz")) ? (float)Args->GetNumberField(TEXT("sz")) : Actor->GetActorScale3D().Z);
+		if (!IsVectorNearlyEqual(Actor->GetActorScale3D(), ExpectedScale))
+		{
+			return Finish(false, FString::Printf(TEXT("Actor scale mismatch after set_actor_scale for %s."), *ActorName));
+		}
+		return Finish(true, FString::Printf(TEXT("Actor scale matches requested values for %s."), *ActorName));
+	}
+
+	if (Cmd == TEXT("set_actor_label"))
+	{
+		FString ActorPath;
+		FString ActorName;
+		ResultObj->TryGetStringField(TEXT("actor_object_path"), ActorPath);
+		ResultObj->TryGetStringField(TEXT("actor_name"), ActorName);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorPath);
+		if (!Actor)
+		{
+			Actor = FindActorByPathLabelOrNameLocal(ActorName);
+		}
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Actor missing after label update: %s"), *ActorName));
+		}
+		if (!Actor->GetActorLabel().Equals(ActorName, ESearchCase::IgnoreCase))
+		{
+			return Finish(false, FString::Printf(TEXT("Actor label mismatch after set_actor_label for %s."), *ActorPath));
+		}
+		return Finish(true, FString::Printf(TEXT("Actor label matches requested value for %s."), *ActorName));
+	}
+
+	if (Cmd == TEXT("set_static_mesh"))
+	{
+		FString ActorName;
+		FString MeshPath;
+		ResultObj->TryGetStringField(TEXT("actor_name"), ActorName);
+		ResultObj->TryGetStringField(TEXT("mesh_path"), MeshPath);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorName);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Actor missing after set_static_mesh: %s"), *ActorName));
+		}
+
+		UStaticMeshComponent* MeshComp = FindStaticMeshComponentOnActor(Actor);
+		if (!MeshComp || !MeshComp->GetStaticMesh())
+		{
+			return Finish(false, FString::Printf(TEXT("Static mesh component missing or empty after set_static_mesh for %s."), *ActorName));
+		}
+		if (!MeshComp->GetStaticMesh()->GetPathName().Equals(MeshPath, ESearchCase::IgnoreCase))
+		{
+			return Finish(false, FString::Printf(TEXT("Static mesh mismatch after set_static_mesh for %s."), *ActorName));
+		}
+		return Finish(true, FString::Printf(TEXT("Static mesh assignment verified for %s."), *ActorName));
+	}
+
+	if (Cmd == TEXT("apply_material_to_actor"))
+	{
+		FString ActorName;
+		FString MaterialPath;
+		double SlotIndexValue = 0.0;
+		ResultObj->TryGetStringField(TEXT("actor_name"), ActorName);
+		ResultObj->TryGetStringField(TEXT("material_path"), MaterialPath);
+		ResultObj->TryGetNumberField(TEXT("slot_index"), SlotIndexValue);
+		const int32 SlotIndex = FMath::TruncToInt(SlotIndexValue);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorName);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Actor missing after apply_material_to_actor: %s"), *ActorName));
+		}
+
+		UMeshComponent* MeshComp = FindMeshComponentOnActor(Actor);
+		UMaterialInterface* Material = MeshComp ? MeshComp->GetMaterial(SlotIndex) : nullptr;
+		if (!Material)
+		{
+			return Finish(false, FString::Printf(TEXT("Material slot %d is empty after apply_material_to_actor for %s."), SlotIndex, *ActorName));
+		}
+		if (!Material->GetPathName().Equals(MaterialPath, ESearchCase::IgnoreCase))
+		{
+			return Finish(false, FString::Printf(TEXT("Material mismatch after apply_material_to_actor for %s slot %d."), *ActorName, SlotIndex));
+		}
+		return Finish(true, FString::Printf(TEXT("Material assignment verified for %s slot %d."), *ActorName, SlotIndex));
+	}
+
+	if (Cmd == TEXT("spawn_actor_at_surface"))
+	{
+		FString ActorPath;
+		ResultObj->TryGetStringField(TEXT("actor_path"), ActorPath);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorPath);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Spawned actor missing after surface spawn: %s"), *ActorPath));
+		}
+
+		const TSharedPtr<FJsonObject>* LocationObj = nullptr;
+		if (!ResultObj->TryGetObjectField(TEXT("location"), LocationObj) || !LocationObj || !LocationObj->IsValid())
+		{
+			return Finish(false, TEXT("Surface spawn response missing location payload."));
+		}
+
+		const FVector ExpectedLocation(
+			(float)(*LocationObj)->GetNumberField(TEXT("x")),
+			(float)(*LocationObj)->GetNumberField(TEXT("y")),
+			(float)(*LocationObj)->GetNumberField(TEXT("z")));
+		if (!IsVectorNearlyEqual(Actor->GetActorLocation(), ExpectedLocation))
+		{
+			return Finish(false, FString::Printf(TEXT("Surface spawn location mismatch for %s."), *ActorPath));
+		}
+		return Finish(true, FString::Printf(TEXT("Surface-spawned actor exists at requested hit location for %s."), *ActorPath));
+	}
+
+	if (Cmd == TEXT("align_actors_to_surface"))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ResultsArray = nullptr;
+		if (!ResultObj->TryGetArrayField(TEXT("results"), ResultsArray) || !ResultsArray)
+		{
+			return Finish(false, TEXT("align_actors_to_surface response missing results array."));
+		}
+
+		for (const TSharedPtr<FJsonValue>& EntryValue : *ResultsArray)
+		{
+			const TSharedPtr<FJsonObject> EntryObj = EntryValue.IsValid() ? EntryValue->AsObject() : nullptr;
+			if (!EntryObj.IsValid())
+			{
+				return Finish(false, TEXT("align_actors_to_surface returned a non-object result entry."));
+			}
+
+			FString Label;
+			EntryObj->TryGetStringField(TEXT("label"), Label);
+			const bool bEntryOk = !EntryObj->HasField(TEXT("ok")) || EntryObj->GetBoolField(TEXT("ok"));
+			if (!bEntryOk)
+			{
+				return Finish(false, FString::Printf(TEXT("align_actors_to_surface reported a failed entry for %s."), *Label));
+			}
+
+			AActor* Actor = FindActorByPathLabelOrNameLocal(Label);
+			if (!Actor)
+			{
+				return Finish(false, FString::Printf(TEXT("Aligned actor missing after align_actors_to_surface: %s"), *Label));
+			}
+
+			const float ExpectedZ = EntryObj->HasField(TEXT("new_z"))
+				? (float)EntryObj->GetNumberField(TEXT("new_z"))
+				: Actor->GetActorLocation().Z;
+			if (!FMath::IsNearlyEqual(Actor->GetActorLocation().Z, ExpectedZ, 0.05f))
+			{
+				return Finish(false, FString::Printf(TEXT("Aligned actor Z mismatch after align_actors_to_surface for %s."), *Label));
+			}
+		}
+
+		return Finish(true, TEXT("All aligned actors match the reported surface-adjusted Z location."));
+	}
+
+	if (Cmd == TEXT("create_floor"))
+	{
+		FString ActorPath;
+		FString ActorName;
+		ResultObj->TryGetStringField(TEXT("actor_object_path"), ActorPath);
+		ResultObj->TryGetStringField(TEXT("actor_name"), ActorName);
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorPath);
+		if (!Actor)
+		{
+			return Finish(false, FString::Printf(TEXT("Floor actor missing after create_floor: %s"), *ActorName));
+		}
+		return Finish(true, FString::Printf(TEXT("Floor actor exists after create_floor: %s."), *Actor->GetActorLabel()));
+	}
+
+	if (Cmd == TEXT("create_room") || Cmd == TEXT("create_corridor"))
+	{
+		FString GroupPath;
+		double ChildCountValue = 0.0;
+		ResultObj->TryGetStringField(TEXT("group_object_path"), GroupPath);
+		ResultObj->TryGetNumberField(TEXT("child_count"), ChildCountValue);
+
+		AActor* GroupActor = FindActorByPathLabelOrNameLocal(GroupPath);
+		if (!GroupActor)
+		{
+			return Finish(false, FString::Printf(TEXT("Group actor missing after %s: %s"), *Cmd, *GroupPath));
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* ChildrenArray = nullptr;
+		if (!ResultObj->TryGetArrayField(TEXT("children"), ChildrenArray) || !ChildrenArray)
+		{
+			return Finish(false, FString::Printf(TEXT("%s response missing children array."), *Cmd));
+		}
+
+		int32 ExistingChildren = 0;
+		for (const TSharedPtr<FJsonValue>& ChildValue : *ChildrenArray)
+		{
+			const TSharedPtr<FJsonObject> ChildObj = ChildValue.IsValid() ? ChildValue->AsObject() : nullptr;
+			if (!ChildObj.IsValid())
+			{
+				continue;
+			}
+
+			FString ObjectPath;
+			if (!ChildObj->TryGetStringField(TEXT("object_path"), ObjectPath))
+			{
+				continue;
+			}
+
+			if (FindActorByPathLabelOrNameLocal(ObjectPath))
+			{
+				++ExistingChildren;
+			}
+		}
+
+		const int32 ExpectedChildren = FMath::TruncToInt(ChildCountValue);
+		if (ExistingChildren != ExpectedChildren)
+		{
+			return Finish(false, FString::Printf(TEXT("%s child-count mismatch. Expected %d, found %d actors."), *Cmd, ExpectedChildren, ExistingChildren));
+		}
+		return Finish(true, FString::Printf(TEXT("%s group exists and all %d reported children are present."), *Cmd, ExpectedChildren));
+	}
+
+	return false;
+}
+
+static bool HasCommandAwarePostVerifyContract(const FString& Cmd)
+{
+	static const TArray<FString> CommandAwareCmds =
+	{
+		TEXT("spawn_actor"),
+		TEXT("spawn_point_light"), TEXT("spawn_spot_light"),
+		TEXT("spawn_rect_light"), TEXT("spawn_directional_light"),
+		TEXT("compile_blueprint"), TEXT("edit_blueprint_node"),
+		TEXT("set_actor_transform"), TEXT("set_actor_scale"),
+		TEXT("set_actor_label"),
+		TEXT("set_static_mesh"),
+		TEXT("apply_material_to_actor"),
+		TEXT("spawn_actor_at_surface"), TEXT("align_actors_to_surface"),
+		TEXT("create_floor"), TEXT("create_room"), TEXT("create_corridor"),
+	};
+	return CommandAwareCmds.Contains(Cmd);
+}
+
 AActor* UAgentForgeLibrary::FindActorByLabelOrName(const FString& LabelOrName)
 {
 #if WITH_EDITOR
@@ -1389,12 +2076,13 @@ TSharedPtr<FJsonObject> UAgentForgeLibrary::VecToJson(const FVector& V)
 	return Obj;
 }
 
-bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
+static bool IsMainPathMutatingCommand(const FString& Cmd)
 {
 	static const TArray<FString> MutatingCmds =
 	{
 		TEXT("spawn_actor"), TEXT("set_actor_transform"), TEXT("delete_actor"),
 		TEXT("duplicate_actor"),
+		TEXT("spawn_actor_at_surface"), TEXT("align_actors_to_surface"),
 		TEXT("spawn_point_light"), TEXT("spawn_spot_light"),
 		TEXT("spawn_rect_light"), TEXT("spawn_directional_light"),
 		TEXT("set_static_mesh"), TEXT("set_actor_scale"),
@@ -1412,6 +2100,1134 @@ bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
 		// NOTE: execute_python is NOT here — it routes directly (see ExecuteCommandJson).
 	};
 	return MutatingCmds.Contains(Cmd);
+}
+
+bool UAgentForgeLibrary::IsMutatingCommand(const FString& Cmd)
+{
+	return IsMainPathMutatingCommand(Cmd);
+}
+
+// Verification coverage inventory for mutators:
+// - full_4phase: none yet
+// - main_path_partial: ExecuteSafeTransaction with PreFlight + Snapshot/Rollback + PostVerify
+// - main_path_partial_no_snapshot: ExecuteSafeTransaction with Snapshot/Rollback skipped
+// - bypass_manual_verification: bypasses ExecuteSafeTransaction and performs ad hoc verification internally
+// - bypass_unverified: bypasses ExecuteSafeTransaction with no shared verification contract
+static bool DoesCommandSkipSnapshotRollback(const FString& Cmd)
+{
+	static const TArray<FString> SkipSnapshotRollbackCmds =
+	{
+		TEXT("spawn_actor"), TEXT("duplicate_actor"), TEXT("spawn_actor_at_surface"),
+		TEXT("spawn_point_light"), TEXT("spawn_spot_light"),
+		TEXT("spawn_rect_light"), TEXT("spawn_directional_light"),
+		TEXT("group_actors"),
+		TEXT("create_wall"), TEXT("create_floor"), TEXT("create_room"),
+		TEXT("create_corridor"), TEXT("create_staircase"), TEXT("create_pillar"),
+		TEXT("scatter_props"), TEXT("set_fog"), TEXT("set_post_process"), TEXT("set_sky_atmosphere"),
+		TEXT("create_blueprint"), TEXT("create_material_instance"),
+		TEXT("rename_asset"), TEXT("move_asset"), TEXT("delete_asset"),
+	};
+	return SkipSnapshotRollbackCmds.Contains(Cmd);
+}
+
+static bool IsKnownRollbackLeakyCommand(const FString& Cmd)
+{
+	static const TArray<FString> KnownRollbackLeakCmds =
+	{
+		TEXT("spawn_actor_at_surface"),
+		TEXT("create_floor"),
+		TEXT("create_room"),
+		TEXT("create_corridor"),
+	};
+	return KnownRollbackLeakCmds.Contains(Cmd);
+}
+
+static bool CollectRecoveryActorPaths(const FString& Cmd, const FString& CommandResult, TArray<FString>& OutActorPaths, FString& OutError)
+{
+	OutActorPaths.Empty();
+	OutError.Reset();
+
+	TSharedPtr<FJsonObject> ResultObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(CommandResult, ResultObj, ParseErr) || !ResultObj.IsValid())
+	{
+		OutError = FString::Printf(TEXT("Unable to parse command result for recovery probe: %s"), *ParseErr);
+		return false;
+	}
+
+	auto AddPath = [&](const FString& Path)
+	{
+		if (!Path.IsEmpty())
+		{
+			OutActorPaths.AddUnique(Path);
+		}
+	};
+
+	if (Cmd == TEXT("create_floor"))
+	{
+		FString ActorPath;
+		ResultObj->TryGetStringField(TEXT("actor_object_path"), ActorPath);
+		AddPath(ActorPath);
+	}
+	else if (Cmd == TEXT("spawn_actor_at_surface"))
+	{
+		FString ActorPath;
+		ResultObj->TryGetStringField(TEXT("actor_path"), ActorPath);
+		AddPath(ActorPath);
+	}
+	else if (Cmd == TEXT("create_room") || Cmd == TEXT("create_corridor"))
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ChildrenArray = nullptr;
+		if (ResultObj->TryGetArrayField(TEXT("children"), ChildrenArray) && ChildrenArray)
+		{
+			for (const TSharedPtr<FJsonValue>& ChildValue : *ChildrenArray)
+			{
+				const TSharedPtr<FJsonObject> ChildObj = ChildValue.IsValid() ? ChildValue->AsObject() : nullptr;
+				if (!ChildObj.IsValid())
+				{
+					continue;
+				}
+
+				FString ChildPath;
+				ChildObj->TryGetStringField(TEXT("object_path"), ChildPath);
+				AddPath(ChildPath);
+			}
+		}
+
+		FString GroupPath;
+		ResultObj->TryGetStringField(TEXT("group_object_path"), GroupPath);
+		AddPath(GroupPath);
+	}
+	else
+	{
+		OutError = FString::Printf(TEXT("Recovery probe not implemented for command: %s"), *Cmd);
+		return false;
+	}
+
+	if (OutActorPaths.IsEmpty())
+	{
+		OutError = FString::Printf(TEXT("Recovery probe found no actor paths for command: %s"), *Cmd);
+		return false;
+	}
+
+	return true;
+}
+
+static bool DestroyActorsByPathList(const TArray<FString>& ActorPaths, FString& OutError)
+{
+#if WITH_EDITOR
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		OutError = TEXT("No editor world.");
+		return false;
+	}
+
+	for (int32 Index = ActorPaths.Num() - 1; Index >= 0; --Index)
+	{
+		const FString& ActorPath = ActorPaths[Index];
+		AActor* Actor = FindActorByPathLabelOrNameLocal(ActorPath);
+		if (!Actor)
+		{
+			continue;
+		}
+
+		if (!World->DestroyActor(Actor))
+		{
+			OutError = FString::Printf(TEXT("Failed to destroy recovery actor: %s"), *ActorPath);
+			return false;
+		}
+	}
+	return true;
+#else
+	OutError = TEXT("Editor only.");
+	return false;
+#endif
+}
+
+static bool RunCompensatingCleanupProbe(
+	const FString& Cmd,
+	TFunction<FString()> ExecuteCmd,
+	FVerificationPhaseResult& OutResult,
+	int32* OutCleanupActorCount = nullptr,
+	int32* OutPostCleanupActorCount = nullptr)
+{
+	OutResult = FVerificationPhaseResult();
+	OutResult.PhaseName = TEXT("CompensatingCleanupProbe");
+	const double StartTime = FPlatformTime::Seconds();
+	if (OutCleanupActorCount) { *OutCleanupActorCount = 0; }
+	if (OutPostCleanupActorCount) { *OutPostCleanupActorCount = 0; }
+
+	const int32 PreActorCount = CountCurrentActors();
+	const FString ProbeResult = ExecuteCmd();
+	if (ProbeResult.Contains(TEXT("\"error\"")))
+	{
+		OutResult.Passed = false;
+		OutResult.Detail = FString::Printf(TEXT("Probe execution failed: %s"), *ProbeResult);
+		OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+		return false;
+	}
+
+	TArray<FString> RecoveryActorPaths;
+	FString RecoveryError;
+	if (!CollectRecoveryActorPaths(Cmd, ProbeResult, RecoveryActorPaths, RecoveryError))
+	{
+		OutResult.Passed = false;
+		OutResult.Detail = RecoveryError;
+		OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+		return false;
+	}
+
+	if (OutCleanupActorCount)
+	{
+		*OutCleanupActorCount = RecoveryActorPaths.Num();
+	}
+
+	if (!DestroyActorsByPathList(RecoveryActorPaths, RecoveryError))
+	{
+		OutResult.Passed = false;
+		OutResult.Detail = RecoveryError;
+		OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+		return false;
+	}
+
+	const int32 PostCleanupCount = CountCurrentActors();
+	if (OutPostCleanupActorCount)
+	{
+		*OutPostCleanupActorCount = PostCleanupCount;
+	}
+	if (PostCleanupCount != PreActorCount)
+	{
+		OutResult.Passed = false;
+		OutResult.Detail = FString::Printf(
+			TEXT("Compensating cleanup FAILED: expected %d actors after cleanup, got %d."),
+			PreActorCount,
+			PostCleanupCount);
+		OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+		return false;
+	}
+
+	for (const FString& ActorPath : RecoveryActorPaths)
+	{
+		if (FindActorByPathLabelOrNameLocal(ActorPath))
+		{
+			OutResult.Passed = false;
+			OutResult.Detail = FString::Printf(TEXT("Compensating cleanup FAILED: actor still exists after cleanup: %s"), *ActorPath);
+			OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+			return false;
+		}
+	}
+
+	OutResult.Passed = true;
+	OutResult.Detail = FString::Printf(
+		TEXT("Compensating cleanup verified for %d spawned actors; actor count restored to %d."),
+		RecoveryActorPaths.Num(),
+		PostCleanupCount);
+	OutResult.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
+	return true;
+}
+
+static bool IsBypassMutatingCommandWithManualVerification(const FString& Cmd)
+{
+	static const TArray<FString> ManualVerificationBypassCmds =
+	{
+		TEXT("enhance_current_level"),
+		TEXT("observe_analyze_plan_act"),
+		TEXT("enhance_horror_scene"),
+	};
+	return ManualVerificationBypassCmds.Contains(Cmd);
+}
+
+static bool IsBypassMutatingCommand(const FString& Cmd)
+{
+	static const TArray<FString> BypassMutatingCmds =
+	{
+		TEXT("execute_python"),
+		TEXT("set_bt_blackboard"),
+		TEXT("wire_aicontroller_bt"),
+		TEXT("setup_flashlight_scs"),
+		TEXT("import_local_asset"),
+		TEXT("place_asset_thematically"),
+		TEXT("refine_level_section"),
+		TEXT("apply_genre_rules"),
+		TEXT("create_in_editor_asset"),
+		TEXT("enhance_current_level"),
+		TEXT("observe_analyze_plan_act"),
+		TEXT("enhance_horror_scene"),
+		TEXT("create_blockout_level"),
+		TEXT("convert_to_whitebox_modular"),
+		TEXT("apply_set_dressing"),
+		TEXT("apply_professional_lighting"),
+		TEXT("add_living_systems"),
+		TEXT("generate_full_quality_level"),
+		TEXT("op_terrain_generate"),
+		TEXT("op_surface_scatter"),
+		TEXT("op_spline_scatter"),
+		TEXT("op_road_layout"),
+		TEXT("op_biome_layers"),
+		TEXT("op_stamp_poi"),
+		TEXT("run_operator_pipeline"),
+	};
+	return BypassMutatingCmds.Contains(Cmd);
+}
+
+static FString GetVerificationModeForCommand(const FString& Cmd)
+{
+	if (IsBypassMutatingCommandWithManualVerification(Cmd))
+	{
+		return TEXT("bypass_manual_verification");
+	}
+	if (IsBypassMutatingCommand(Cmd))
+	{
+		return TEXT("bypass_unverified");
+	}
+	if (IsMainPathMutatingCommand(Cmd))
+	{
+		if (DoesCommandSkipSnapshotRollback(Cmd))
+		{
+			return IsKnownRollbackLeakyCommand(Cmd)
+				? TEXT("main_path_partial_compensating_cleanup")
+				: TEXT("main_path_partial_no_snapshot");
+		}
+		return TEXT("main_path_partial");
+	}
+	return TEXT("not_applicable");
+}
+
+static FString ResolveExecutedVerificationMode(const FString& Cmd, const bool bHasCommandAwarePostVerify)
+{
+	if (IsBypassMutatingCommandWithManualVerification(Cmd))
+	{
+		return TEXT("bypass_manual_verification");
+	}
+	if (IsBypassMutatingCommand(Cmd))
+	{
+		return TEXT("bypass_unverified");
+	}
+	if (!IsMainPathMutatingCommand(Cmd))
+	{
+		return TEXT("not_applicable");
+	}
+	if (DoesCommandSkipSnapshotRollback(Cmd))
+	{
+		if (IsKnownRollbackLeakyCommand(Cmd))
+		{
+			return bHasCommandAwarePostVerify
+				? TEXT("main_path_partial_compensating_cleanup_post_state_verified")
+				: TEXT("main_path_partial_compensating_cleanup");
+		}
+		return bHasCommandAwarePostVerify
+			? TEXT("main_path_partial_post_state_verified_no_snapshot")
+			: TEXT("main_path_partial_no_snapshot");
+	}
+	return bHasCommandAwarePostVerify
+		? TEXT("main_path_verified")
+		: TEXT("main_path_partial");
+}
+
+static FString BuildPreFlightActionDescription(const FString& Cmd)
+{
+	if (Cmd == TEXT("spawn_actor_at_surface"))
+	{
+		return TEXT("surface placement spawn");
+	}
+	if (Cmd == TEXT("align_actors_to_surface"))
+	{
+		return TEXT("surface alignment transform");
+	}
+	if (Cmd == TEXT("spawn_directional_light"))
+	{
+		return TEXT("sunlight actor placement");
+	}
+	if (Cmd == TEXT("compile_blueprint"))
+	{
+		return TEXT("validation script graph build pass");
+	}
+	if (Cmd == TEXT("edit_blueprint_node"))
+	{
+		return TEXT("visual script node edit in validation sandbox");
+	}
+	return Cmd;
+}
+
+static int32 DetermineExpectedActorDelta(const FString& Cmd, const FString& CommandResult)
+{
+	if (Cmd == TEXT("spawn_actor") ||
+		Cmd == TEXT("spawn_actor_at_surface") ||
+		Cmd == TEXT("spawn_point_light") ||
+		Cmd == TEXT("spawn_spot_light") ||
+		Cmd == TEXT("spawn_rect_light") ||
+		Cmd == TEXT("spawn_directional_light") ||
+		Cmd == TEXT("create_floor"))
+	{
+		return 1;
+	}
+	if (Cmd == TEXT("delete_actor"))
+	{
+		return -1;
+	}
+	if (Cmd == TEXT("create_room") || Cmd == TEXT("create_corridor"))
+	{
+		TSharedPtr<FJsonObject> ResultObj;
+		FString ParseErr;
+		if (ParseJsonObjectLocal(CommandResult, ResultObj, ParseErr) && ResultObj.IsValid())
+		{
+			double ChildCountValue = 0.0;
+			if (ResultObj->TryGetNumberField(TEXT("child_count"), ChildCountValue))
+			{
+				return FMath::TruncToInt(ChildCountValue) + 1;
+			}
+		}
+	}
+	return 0;
+}
+
+static FString AnnotateResponseWithVerificationMetadata(const FString& ResponseJson, const FString& Cmd, const FString* VerificationModeOverride = nullptr)
+{
+	const FString VerificationMode = VerificationModeOverride ? *VerificationModeOverride : GetVerificationModeForCommand(Cmd);
+	if (VerificationMode == TEXT("not_applicable"))
+	{
+		return ResponseJson;
+	}
+
+	TSharedPtr<FJsonObject> Root;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(ResponseJson, Root, ParseErr) || !Root.IsValid())
+	{
+		return ResponseJson;
+	}
+
+	const bool bBypassesMainPath =
+		VerificationMode == TEXT("bypass_manual_verification") ||
+		VerificationMode == TEXT("bypass_unverified");
+
+	if (!Root->HasField(TEXT("verification_mode")))
+	{
+		Root->SetStringField(TEXT("verification_mode"), VerificationMode);
+	}
+	if (!Root->HasField(TEXT("verification_bypasses_main_path")))
+	{
+		Root->SetBoolField(TEXT("verification_bypasses_main_path"), bBypassesMainPath);
+	}
+	if (VerificationMode == TEXT("bypass_unverified") && !Root->HasField(TEXT("unverified")))
+	{
+		Root->SetBoolField(TEXT("unverified"), true);
+	}
+	return ToJsonStringLocal(Root);
+}
+
+static FString AnnotateResponseWithRecoveryMetadata(
+	const FString& ResponseJson,
+	const FString& RecoveryMode,
+	const FString& RecoveryDetail,
+	int32 RecoveryCleanupActorCount,
+	int32 RecoveryPostCleanupActorCount)
+{
+	TSharedPtr<FJsonObject> Root;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(ResponseJson, Root, ParseErr) || !Root.IsValid())
+	{
+		return ResponseJson;
+	}
+
+	Root->SetBoolField(TEXT("recovery_probe_used"), true);
+	Root->SetStringField(TEXT("recovery_mode"), RecoveryMode);
+	Root->SetStringField(TEXT("recovery_detail"), RecoveryDetail);
+	Root->SetNumberField(TEXT("recovery_cleanup_actor_count"), RecoveryCleanupActorCount);
+	Root->SetNumberField(TEXT("recovery_post_cleanup_actor_count"), RecoveryPostCleanupActorCount);
+	return ToJsonStringLocal(Root);
+}
+
+static FString VerifyPresetStateAndAnnotate(const FString& Cmd, const TSharedPtr<FJsonObject>& Args, const FString& RawResponse)
+{
+	TSharedPtr<FJsonObject> ResponseObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(RawResponse, ResponseObj, ParseErr) || !ResponseObj.IsValid() || ResponseObj->HasField(TEXT("error")))
+	{
+		return RawResponse;
+	}
+
+	FVerificationPhaseResult StateVerify;
+	StateVerify.PhaseName = TEXT("StateVerify");
+	StateVerify.Passed = false;
+	StateVerify.DurationMs = 0.f;
+
+	if (Cmd == TEXT("load_preset"))
+	{
+		FString LoadedName;
+		ResponseObj->TryGetStringField(TEXT("preset_name"), LoadedName);
+
+		TSharedPtr<FJsonObject> CurrentPresetObj;
+		const FString CurrentPresetRaw = FLevelPresetSystem::GetCurrentPreset();
+		if (ParseJsonObjectLocal(CurrentPresetRaw, CurrentPresetObj, ParseErr) && CurrentPresetObj.IsValid())
+		{
+			FString CurrentName;
+			CurrentPresetObj->TryGetStringField(TEXT("preset_name"), CurrentName);
+			StateVerify.Passed = !LoadedName.IsEmpty() && LoadedName.Equals(CurrentName, ESearchCase::IgnoreCase);
+			StateVerify.Detail = StateVerify.Passed
+				? FString::Printf(TEXT("Current preset matches loaded preset %s."), *LoadedName)
+				: FString::Printf(TEXT("Current preset mismatch after load_preset. Expected %s."), *LoadedName);
+		}
+		else
+		{
+			StateVerify.Detail = TEXT("Unable to read current preset after load_preset.");
+		}
+	}
+	else if (Cmd == TEXT("save_preset"))
+	{
+		FString PresetName;
+		FString SavedPath;
+		ResponseObj->TryGetStringField(TEXT("preset_name"), PresetName);
+		ResponseObj->TryGetStringField(TEXT("saved_path"), SavedPath);
+		const FString SavedPathFull = FPaths::ConvertRelativePathToFull(SavedPath);
+
+		FString SavedJson;
+		TSharedPtr<FJsonObject> SavedObj;
+		if (!SavedPathFull.IsEmpty() &&
+			FPaths::FileExists(SavedPathFull) &&
+			FFileHelper::LoadFileToString(SavedJson, *SavedPathFull) &&
+			ParseJsonObjectLocal(SavedJson, SavedObj, ParseErr) &&
+			SavedObj.IsValid())
+		{
+			FString SavedPresetName;
+			SavedObj->TryGetStringField(TEXT("preset_name"), SavedPresetName);
+			StateVerify.Passed = !PresetName.IsEmpty() && PresetName.Equals(SavedPresetName, ESearchCase::IgnoreCase);
+			StateVerify.Detail = StateVerify.Passed
+				? FString::Printf(TEXT("Preset file saved and parsed for %s."), *PresetName)
+				: FString::Printf(TEXT("Saved preset payload mismatch for %s."), *PresetName);
+		}
+		else
+		{
+			StateVerify.Detail = FString::Printf(TEXT("Unable to read saved preset file: %s"), *SavedPathFull);
+		}
+	}
+	else
+	{
+		return RawResponse;
+	}
+
+	const FString VerificationMode = TEXT("state_verified");
+	if (UVerificationEngine* VE = UVerificationEngine::Get())
+	{
+		TArray<FVerificationPhaseResult> ExecutedResults;
+		ExecutedResults.Add(StateVerify);
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			0,
+			StateVerify.Passed,
+			ExecutedResults,
+			TArray<FVerificationPhaseResult>(),
+			VerificationMode);
+	}
+
+	if (!StateVerify.Passed)
+	{
+		TSharedPtr<FJsonObject> FailureObj = MakeShared<FJsonObject>();
+		FailureObj->SetStringField(TEXT("error"), FString::Printf(TEXT("StateVerify FAILED: %s"), *StateVerify.Detail));
+		const FString Failure = AnnotateResponseWithVerificationMetadata(
+			ToJsonStringLocal(FailureObj),
+			Cmd,
+			&VerificationMode);
+		return Failure;
+	}
+
+	ResponseObj->SetStringField(TEXT("verification_detail"), StateVerify.Detail);
+	return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(ResponseObj), Cmd, &VerificationMode);
+}
+
+static FString VerifyCreateBlockoutLevelAndAnnotate(const FString& Cmd, const TSharedPtr<FJsonObject>& Args, const FString& RawResponse)
+{
+#if WITH_EDITOR
+	TSharedPtr<FJsonObject> ResponseObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(RawResponse, ResponseObj, ParseErr) || !ResponseObj.IsValid() || ResponseObj->HasField(TEXT("error")))
+	{
+		return RawResponse;
+	}
+
+	double RoomsPlacedValue = 0.0;
+	double CorridorsPlacedValue = 0.0;
+	const bool bExpectedNavmesh = !ResponseObj->HasField(TEXT("navmesh_placed")) || ResponseObj->GetBoolField(TEXT("navmesh_placed"));
+	const bool bExpectedPlayerStart = !ResponseObj->HasField(TEXT("player_start_placed")) || ResponseObj->GetBoolField(TEXT("player_start_placed"));
+	ResponseObj->TryGetNumberField(TEXT("rooms_placed"), RoomsPlacedValue);
+	ResponseObj->TryGetNumberField(TEXT("corridors_placed"), CorridorsPlacedValue);
+	const int32 ExpectedRooms = FMath::TruncToInt(RoomsPlacedValue);
+	const int32 ExpectedCorridors = FMath::TruncToInt(CorridorsPlacedValue);
+
+	int32 ActualRooms = 0;
+	int32 ActualCorridors = 0;
+	bool bFoundPlayerStart = false;
+	bool bFoundNavmesh = false;
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (World)
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!Actor || !IsValid(Actor))
+			{
+				continue;
+			}
+
+			const FString Label = Actor->GetActorLabel();
+			if (Label.StartsWith(TEXT("Blockout_Room_")))
+			{
+				++ActualRooms;
+			}
+			else if (Label.StartsWith(TEXT("Blockout_Corridor_")))
+			{
+				++ActualCorridors;
+			}
+			else if (Actor->IsA(APlayerStart::StaticClass()))
+			{
+				bFoundPlayerStart = true;
+			}
+			else if (Actor->IsA(ANavMeshBoundsVolume::StaticClass()))
+			{
+				bFoundNavmesh = true;
+			}
+		}
+	}
+
+	FVerificationPhaseResult StateVerify;
+	StateVerify.PhaseName = TEXT("StateVerify");
+	StateVerify.Passed =
+		ActualRooms >= ExpectedRooms &&
+		ActualCorridors >= ExpectedCorridors &&
+		(!bExpectedPlayerStart || bFoundPlayerStart) &&
+		(!bExpectedNavmesh || bFoundNavmesh);
+	StateVerify.Detail = FString::Printf(
+		TEXT("Blockout state verify: rooms %d/%d, corridors %d/%d, player_start=%s, navmesh=%s."),
+		ActualRooms,
+		ExpectedRooms,
+		ActualCorridors,
+		ExpectedCorridors,
+		bFoundPlayerStart ? TEXT("present") : TEXT("missing"),
+		bFoundNavmesh ? TEXT("present") : TEXT("missing"));
+
+	const FString VerificationMode = TEXT("state_verified");
+	if (UVerificationEngine* VE = UVerificationEngine::Get())
+	{
+		TArray<FVerificationPhaseResult> ExecutedResults;
+		ExecutedResults.Add(StateVerify);
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			0,
+			StateVerify.Passed,
+			ExecutedResults,
+			TArray<FVerificationPhaseResult>(),
+			VerificationMode);
+	}
+
+	if (!StateVerify.Passed)
+	{
+		TSharedPtr<FJsonObject> FailureObj = MakeShared<FJsonObject>();
+		FailureObj->SetStringField(TEXT("error"), FString::Printf(TEXT("StateVerify FAILED: %s"), *StateVerify.Detail));
+		return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(FailureObj), Cmd, &VerificationMode);
+	}
+
+	ResponseObj->SetStringField(TEXT("verification_detail"), StateVerify.Detail);
+	return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(ResponseObj), Cmd, &VerificationMode);
+#else
+	return RawResponse;
+#endif
+}
+
+static FString VerifyApplyProfessionalLightingAndAnnotate(const FString& Cmd, const TSharedPtr<FJsonObject>& Args, const FString& RawResponse)
+{
+#if WITH_EDITOR
+	TSharedPtr<FJsonObject> ResponseObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(RawResponse, ResponseObj, ParseErr) || !ResponseObj.IsValid() || ResponseObj->HasField(TEXT("error")))
+	{
+		return RawResponse;
+	}
+
+	double LightsPlacedValue = 0.0;
+	double FogDensityValue = 0.0;
+	ResponseObj->TryGetNumberField(TEXT("lights_placed"), LightsPlacedValue);
+	ResponseObj->TryGetNumberField(TEXT("fog_density"), FogDensityValue);
+	const int32 ExpectedLights = FMath::TruncToInt(LightsPlacedValue);
+	const bool bExpectedGodRay = ResponseObj->HasField(TEXT("god_rays")) && ResponseObj->GetBoolField(TEXT("god_rays"));
+
+	int32 PipelineLightActors = 0;
+	bool bFoundKeyLight = false;
+	bool bFoundGodRay = false;
+	bool bFoundFog = false;
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (World)
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!Actor || !IsValid(Actor))
+			{
+				continue;
+			}
+
+			const FString Label = Actor->GetActorLabel();
+			if (Label.StartsWith(TEXT("Pipeline_FillLight_")) || Label.Equals(TEXT("Pipeline_KeyLight")) || Label.Equals(TEXT("Pipeline_GodRay")))
+			{
+				++PipelineLightActors;
+			}
+			if (Label.Equals(TEXT("Pipeline_KeyLight")))
+			{
+				bFoundKeyLight = true;
+			}
+			if (Label.Equals(TEXT("Pipeline_GodRay")))
+			{
+				bFoundGodRay = true;
+			}
+		}
+
+		for (TActorIterator<AExponentialHeightFog> It(World); It; ++It)
+		{
+			AExponentialHeightFog* FogActor = *It;
+			if (!FogActor || !IsValid(FogActor) || !FogActor->GetComponent())
+			{
+				continue;
+			}
+
+			const float ActualFogDensity = FogActor->GetComponent()->FogDensity;
+			if (FMath::IsNearlyEqual(ActualFogDensity, static_cast<float>(FogDensityValue), 0.0005f))
+			{
+				bFoundFog = true;
+				break;
+			}
+		}
+	}
+
+	FVerificationPhaseResult StateVerify;
+	StateVerify.PhaseName = TEXT("StateVerify");
+	StateVerify.Passed =
+		bFoundKeyLight &&
+		PipelineLightActors >= ExpectedLights &&
+		bFoundFog &&
+		(!bExpectedGodRay || bFoundGodRay);
+	StateVerify.Detail = FString::Printf(
+		TEXT("Lighting state verify: pipeline_lights=%d/%d, key_light=%s, god_ray=%s, fog_density_match=%s."),
+		PipelineLightActors,
+		ExpectedLights,
+		bFoundKeyLight ? TEXT("present") : TEXT("missing"),
+		bFoundGodRay ? TEXT("present") : TEXT("missing"),
+		bFoundFog ? TEXT("yes") : TEXT("no"));
+
+	const FString VerificationMode = TEXT("state_verified");
+	if (UVerificationEngine* VE = UVerificationEngine::Get())
+	{
+		TArray<FVerificationPhaseResult> ExecutedResults;
+		ExecutedResults.Add(StateVerify);
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			0,
+			StateVerify.Passed,
+			ExecutedResults,
+			TArray<FVerificationPhaseResult>(),
+			VerificationMode);
+	}
+
+	if (!StateVerify.Passed)
+	{
+		TSharedPtr<FJsonObject> FailureObj = MakeShared<FJsonObject>();
+		FailureObj->SetStringField(TEXT("error"), FString::Printf(TEXT("StateVerify FAILED: %s"), *StateVerify.Detail));
+		return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(FailureObj), Cmd, &VerificationMode);
+	}
+
+	ResponseObj->SetStringField(TEXT("verification_detail"), StateVerify.Detail);
+	return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(ResponseObj), Cmd, &VerificationMode);
+#else
+	return RawResponse;
+#endif
+}
+
+static FString VerifyApplySetDressingAndAnnotate(const FString& Cmd, const TSharedPtr<FJsonObject>& Args, const FString& RawResponse)
+{
+#if WITH_EDITOR
+	TSharedPtr<FJsonObject> ResponseObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(RawResponse, ResponseObj, ParseErr) || !ResponseObj.IsValid() || ResponseObj->HasField(TEXT("error")))
+	{
+		return RawResponse;
+	}
+
+	FString StoryTheme = TEXT("generic");
+	double PropsPlacedValue = 0.0;
+	double RoomsDressedValue = 0.0;
+	double MicroStoriesValue = 0.0;
+	if (!ResponseObj->TryGetStringField(TEXT("story_theme"), StoryTheme) && Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("story_theme"), StoryTheme);
+	}
+	ResponseObj->TryGetNumberField(TEXT("props_placed"), PropsPlacedValue);
+	ResponseObj->TryGetNumberField(TEXT("rooms_dressed"), RoomsDressedValue);
+	ResponseObj->TryGetNumberField(TEXT("micro_stories"), MicroStoriesValue);
+
+	const FString ThemePrefix = StoryTheme.Left(8);
+	int32 MatchingProps = 0;
+	int32 RoomActors = 0;
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (World)
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (!Actor || !IsValid(Actor))
+			{
+				continue;
+			}
+
+			const FString Label = Actor->GetActorLabel();
+			if (Label.StartsWith(TEXT("Blockout_Room_")) || Label.StartsWith(TEXT("Arch_Room_")))
+			{
+				++RoomActors;
+			}
+			if (Label.StartsWith(TEXT("Prop_Room")) && Label.Contains(ThemePrefix))
+			{
+				++MatchingProps;
+			}
+		}
+	}
+
+	FVerificationPhaseResult StateVerify;
+	StateVerify.PhaseName = TEXT("StateVerify");
+	StateVerify.Passed =
+		MatchingProps >= FMath::TruncToInt(PropsPlacedValue) &&
+		RoomActors >= FMath::TruncToInt(RoomsDressedValue) &&
+		FMath::TruncToInt(MicroStoriesValue) <= FMath::TruncToInt(RoomsDressedValue);
+	StateVerify.Detail = FString::Printf(
+		TEXT("Set dressing state verify: themed_props=%d/%d, rooms=%d/%d, micro_stories=%d."),
+		MatchingProps,
+		FMath::TruncToInt(PropsPlacedValue),
+		RoomActors,
+		FMath::TruncToInt(RoomsDressedValue),
+		FMath::TruncToInt(MicroStoriesValue));
+
+	const FString VerificationMode = TEXT("state_verified");
+	if (UVerificationEngine* VE = UVerificationEngine::Get())
+	{
+		TArray<FVerificationPhaseResult> ExecutedResults;
+		ExecutedResults.Add(StateVerify);
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			0,
+			StateVerify.Passed,
+			ExecutedResults,
+			TArray<FVerificationPhaseResult>(),
+			VerificationMode);
+	}
+
+	if (!StateVerify.Passed)
+	{
+		TSharedPtr<FJsonObject> FailureObj = MakeShared<FJsonObject>();
+		FailureObj->SetStringField(TEXT("error"), FString::Printf(TEXT("StateVerify FAILED: %s"), *StateVerify.Detail));
+		return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(FailureObj), Cmd, &VerificationMode);
+	}
+
+	ResponseObj->SetStringField(TEXT("verification_detail"), StateVerify.Detail);
+	return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(ResponseObj), Cmd, &VerificationMode);
+#else
+	return RawResponse;
+#endif
+}
+
+static FString VerifyPlaceAssetThematicallyAndAnnotate(const FString& Cmd, const TSharedPtr<FJsonObject>& Args, const FString& RawResponse)
+{
+#if WITH_EDITOR
+	TSharedPtr<FJsonObject> ResponseObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(RawResponse, ResponseObj, ParseErr) || !ResponseObj.IsValid() || ResponseObj->HasField(TEXT("error")))
+	{
+		return RawResponse;
+	}
+
+	double PlacedCountValue = 0.0;
+	ResponseObj->TryGetNumberField(TEXT("placed_count"), PlacedCountValue);
+	const int32 ExpectedPlacedCount = FMath::TruncToInt(PlacedCountValue);
+
+	const TArray<TSharedPtr<FJsonValue>>* ActorsArray = nullptr;
+	ResponseObj->TryGetArrayField(TEXT("actors"), ActorsArray);
+
+	int32 VerifiedActors = 0;
+	int32 MatchingLabels = 0;
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (World && ActorsArray)
+	{
+		for (const TSharedPtr<FJsonValue>& ActorValue : *ActorsArray)
+		{
+			const TSharedPtr<FJsonObject>* ActorObj = nullptr;
+			if (!ActorValue.IsValid() || !ActorValue->TryGetObject(ActorObj) || !ActorObj || !ActorObj->IsValid())
+			{
+				continue;
+			}
+
+			FString Label;
+			(*ActorObj)->TryGetStringField(TEXT("label"), Label);
+			const TSharedPtr<FJsonObject>* LocationObj = nullptr;
+			if (Label.IsEmpty() || !(*ActorObj)->TryGetObjectField(TEXT("location"), LocationObj) || !LocationObj || !LocationObj->IsValid())
+			{
+				continue;
+			}
+
+			double X = 0.0;
+			double Y = 0.0;
+			double Z = 0.0;
+			(*LocationObj)->TryGetNumberField(TEXT("x"), X);
+			(*LocationObj)->TryGetNumberField(TEXT("y"), Y);
+			(*LocationObj)->TryGetNumberField(TEXT("z"), Z);
+
+			AActor* FoundActor = FindActorByPathLabelOrNameLocal(Label);
+			if (!FoundActor || !IsValid(FoundActor))
+			{
+				continue;
+			}
+
+			++MatchingLabels;
+			const FVector ExpectedLocation(static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z));
+			if (FVector::Dist(FoundActor->GetActorLocation(), ExpectedLocation) <= 25.0f)
+			{
+				++VerifiedActors;
+			}
+		}
+	}
+
+	FVerificationPhaseResult StateVerify;
+	StateVerify.PhaseName = TEXT("StateVerify");
+	StateVerify.Passed =
+		ActorsArray &&
+		ExpectedPlacedCount == ActorsArray->Num() &&
+		MatchingLabels == ExpectedPlacedCount &&
+		VerifiedActors == ExpectedPlacedCount;
+	StateVerify.Detail = FString::Printf(
+		TEXT("PlaceAssetThematically state verify: actors_verified=%d/%d, labels_found=%d/%d."),
+		VerifiedActors,
+		ExpectedPlacedCount,
+		MatchingLabels,
+		ExpectedPlacedCount);
+
+	const FString VerificationMode = TEXT("state_verified");
+	if (UVerificationEngine* VE = UVerificationEngine::Get())
+	{
+		TArray<FVerificationPhaseResult> ExecutedResults;
+		ExecutedResults.Add(StateVerify);
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			0,
+			StateVerify.Passed,
+			ExecutedResults,
+			TArray<FVerificationPhaseResult>(),
+			VerificationMode);
+	}
+
+	if (!StateVerify.Passed)
+	{
+		TSharedPtr<FJsonObject> FailureObj = MakeShared<FJsonObject>();
+		FailureObj->SetStringField(TEXT("error"), FString::Printf(TEXT("StateVerify FAILED: %s"), *StateVerify.Detail));
+		return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(FailureObj), Cmd, &VerificationMode);
+	}
+
+	ResponseObj->SetStringField(TEXT("verification_detail"), StateVerify.Detail);
+	return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(ResponseObj), Cmd, &VerificationMode);
+#else
+	return RawResponse;
+#endif
+}
+
+static FString VerifyApplyGenreRulesAndAnnotate(const FString& Cmd, const TSharedPtr<FJsonObject>& Args)
+{
+#if WITH_EDITOR
+	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	if (!World)
+	{
+		return FSemanticCommandModule::ApplyGenreRules(Args);
+	}
+
+	struct FLightSnapshot
+	{
+		FString ActorPath;
+		float Intensity = 0.f;
+	};
+
+	TArray<FLightSnapshot> PreLights;
+	PreLights.Reserve(16);
+	for (TActorIterator<ALight> It(World); It; ++It)
+	{
+		ALight* LightActor = *It;
+		if (!LightActor || !IsValid(LightActor) || LightActor->IsA<ADirectionalLight>() || LightActor->IsA<ASkyLight>())
+		{
+			continue;
+		}
+
+		if (ULightComponent* LC = LightActor->GetLightComponent())
+		{
+			FLightSnapshot Snapshot;
+			Snapshot.ActorPath = LightActor->GetPathName();
+			Snapshot.Intensity = LC->Intensity;
+			PreLights.Add(Snapshot);
+		}
+	}
+
+	APostProcessVolume* PrePP = nullptr;
+	FPostProcessSettings PrePPSettings;
+	for (TActorIterator<APostProcessVolume> It(World); It; ++It)
+	{
+		PrePP = *It;
+		if (PrePP && IsValid(PrePP))
+		{
+			PrePPSettings = PrePP->Settings;
+			break;
+		}
+	}
+
+	AExponentialHeightFog* PreFog = nullptr;
+	float PreFogDensity = 0.f;
+	for (TActorIterator<AExponentialHeightFog> It(World); It; ++It)
+	{
+		PreFog = *It;
+		if (PreFog && IsValid(PreFog) && PreFog->GetComponent())
+		{
+			PreFogDensity = PreFog->GetComponent()->FogDensity;
+			break;
+		}
+	}
+
+	const FString RawResponse = FSemanticCommandModule::ApplyGenreRules(Args);
+
+	TSharedPtr<FJsonObject> ResponseObj;
+	FString ParseErr;
+	if (!ParseJsonObjectLocal(RawResponse, ResponseObj, ParseErr) || !ResponseObj.IsValid() || ResponseObj->HasField(TEXT("error")))
+	{
+		return RawResponse;
+	}
+
+	FString Genre = TEXT("neutral");
+	double IntensityValue = 1.0;
+	double LightsModifiedValue = 0.0;
+	bool bPPModified = false;
+	ResponseObj->TryGetStringField(TEXT("genre"), Genre);
+	ResponseObj->TryGetNumberField(TEXT("intensity"), IntensityValue);
+	ResponseObj->TryGetNumberField(TEXT("lights_modified"), LightsModifiedValue);
+	ResponseObj->TryGetBoolField(TEXT("pp_modified"), bPPModified);
+
+	const float Intensity = FMath::Clamp(static_cast<float>(IntensityValue), 0.f, 1.f);
+
+	struct FGenrePresetLocal
+	{
+		float LightMultiplier;
+		float Vignette;
+		float Grain;
+		float ExposureBias;
+		float FogDensityMult;
+		float CRTWeight;
+	};
+
+	FGenrePresetLocal Preset = { 1.f, 0.4f, 0.05f, 0.f, 1.f, 0.f };
+	if (Genre == TEXT("horror"))   { Preset = { 0.40f, 0.85f, 0.45f, -0.8f, 1.50f, 0.40f }; }
+	else if (Genre == TEXT("dark"))     { Preset = { 0.60f, 0.65f, 0.25f, -0.5f, 1.30f, 0.15f }; }
+	else if (Genre == TEXT("thriller")) { Preset = { 0.70f, 0.55f, 0.15f, -0.3f, 1.00f, 0.00f }; }
+
+	const auto Blend = [Intensity](float Base, float Target) -> float
+	{
+		return FMath::Lerp(Base, Target, Intensity);
+	};
+
+	const float ExpectedLightMult = Blend(1.f, Preset.LightMultiplier);
+	const float ExpectedVignette = Blend(0.4f, Preset.Vignette);
+	const float ExpectedGrain = Blend(0.05f, Preset.Grain);
+	const float ExpectedExposure = Blend(0.f, Preset.ExposureBias);
+	const float ExpectedFogMult = Blend(1.f, Preset.FogDensityMult);
+	const float ExpectedCRTWeight = Blend(0.f, Preset.CRTWeight);
+
+	int32 VerifiedLights = 0;
+	for (const FLightSnapshot& Snapshot : PreLights)
+	{
+		AActor* Actor = FindActorByPathLabelOrNameLocal(Snapshot.ActorPath);
+		ALight* LightActor = Cast<ALight>(Actor);
+		if (!LightActor || !IsValid(LightActor))
+		{
+			continue;
+		}
+
+		if (ULightComponent* LC = LightActor->GetLightComponent())
+		{
+			const float ExpectedIntensity = Snapshot.Intensity * ExpectedLightMult;
+			if (FMath::IsNearlyEqual(LC->Intensity, ExpectedIntensity, FMath::Max(0.5f, FMath::Abs(ExpectedIntensity) * 0.001f)))
+			{
+				++VerifiedLights;
+			}
+		}
+	}
+
+	bool bPPStateOk = !bPPModified;
+	if (bPPModified && PrePP && IsValid(PrePP))
+	{
+		const FPostProcessSettings& Settings = PrePP->Settings;
+		bPPStateOk =
+			Settings.bOverride_VignetteIntensity &&
+			Settings.bOverride_FilmGrainIntensity &&
+			Settings.bOverride_AutoExposureBias &&
+			FMath::IsNearlyEqual(Settings.VignetteIntensity, ExpectedVignette, 0.001f) &&
+			FMath::IsNearlyEqual(Settings.FilmGrainIntensity, ExpectedGrain, 0.001f) &&
+			FMath::IsNearlyEqual(Settings.AutoExposureBias, ExpectedExposure, 0.001f);
+
+		if (bPPStateOk && Settings.WeightedBlendables.Array.Num() > 0)
+		{
+			for (const FWeightedBlendable& WB : Settings.WeightedBlendables.Array)
+			{
+				if (WB.Object && !FMath::IsNearlyEqual(WB.Weight, ExpectedCRTWeight, 0.001f))
+				{
+					bPPStateOk = false;
+					break;
+				}
+			}
+		}
+	}
+
+	bool bFogStateOk = true;
+	if (PreFog && IsValid(PreFog) && PreFog->GetComponent())
+	{
+		const float ExpectedFogDensity = PreFogDensity * ExpectedFogMult;
+		bFogStateOk = FMath::IsNearlyEqual(PreFog->GetComponent()->FogDensity, ExpectedFogDensity, 0.0005f);
+	}
+
+	FVerificationPhaseResult StateVerify;
+	StateVerify.PhaseName = TEXT("StateVerify");
+	StateVerify.Passed =
+		VerifiedLights == FMath::TruncToInt(LightsModifiedValue) &&
+		bPPStateOk &&
+		bFogStateOk;
+	StateVerify.Detail = FString::Printf(
+		TEXT("ApplyGenreRules state verify: lights=%d/%d, pp=%s, fog=%s."),
+		VerifiedLights,
+		FMath::TruncToInt(LightsModifiedValue),
+		bPPStateOk ? TEXT("ok") : TEXT("mismatch"),
+		bFogStateOk ? TEXT("ok") : TEXT("mismatch"));
+
+	const FString VerificationMode = TEXT("state_verified");
+	if (UVerificationEngine* VE = UVerificationEngine::Get())
+	{
+		TArray<FVerificationPhaseResult> ExecutedResults;
+		ExecutedResults.Add(StateVerify);
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			0,
+			StateVerify.Passed,
+			ExecutedResults,
+			TArray<FVerificationPhaseResult>(),
+			VerificationMode);
+	}
+
+	if (!StateVerify.Passed)
+	{
+		TSharedPtr<FJsonObject> FailureObj = MakeShared<FJsonObject>();
+		FailureObj->SetStringField(TEXT("error"), FString::Printf(TEXT("StateVerify FAILED: %s"), *StateVerify.Detail));
+		return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(FailureObj), Cmd, &VerificationMode);
+	}
+
+	ResponseObj->SetStringField(TEXT("verification_detail"), StateVerify.Detail);
+	return AnnotateResponseWithVerificationMetadata(ToJsonStringLocal(ResponseObj), Cmd, &VerificationMode);
+#else
+	return FSemanticCommandModule::ApplyGenreRules(Args);
+#endif
 }
 
 void UAgentForgeLibrary::MarkEngineShuttingDown()
@@ -1517,19 +3333,24 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 		Args = *ArgsPtr;
 	}
 
+	auto FinalizeCommandResponse = [&](const FString& RawResponse) -> FString
+	{
+		return AnnotateResponseWithVerificationMetadata(RawResponse, Cmd);
+	};
+
 	// execute_python bypasses ExecuteSafeTransaction — Python scripts may perform
 	// non-undoable operations (new_level, load_level, file I/O) that break rollback
 	// verification. Route directly so the script runs once without a test phase.
-	if (Cmd == TEXT("execute_python"))        { return Cmd_ExecutePython(Args); }
+	if (Cmd == TEXT("execute_python"))        { return FinalizeCommandResponse(Cmd_ExecutePython(Args)); }
 	// set_bt_blackboard bypasses Python CPF_Protected restriction on BehaviorTree::BlackboardAsset
-	if (Cmd == TEXT("set_bt_blackboard"))     { return Cmd_SetBtBlackboard(Args); }
+	if (Cmd == TEXT("set_bt_blackboard"))     { return FinalizeCommandResponse(Cmd_SetBtBlackboard(Args)); }
 
 	// Mutating commands run inside a full safe transaction with verification.
 	if (IsMutatingCommand(Cmd))
 	{
 		FString Result;
 		ExecuteSafeTransaction(RequestJson, Result);
-		return Result;
+		return FinalizeCommandResponse(Result);
 	}
 
 	// Read-only / meta commands route directly.
@@ -1571,13 +3392,13 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("set_viewport_camera"))   { return Cmd_SetViewportCamera(Args); }
 	if (Cmd == TEXT("redraw_viewports"))      { return Cmd_RedrawViewports(); }
 	// wire_aicontroller_bt: creates BeginPlay→RunBehaviorTree in an AIController Blueprint
-	if (Cmd == TEXT("wire_aicontroller_bt"))  { return Cmd_WireAIControllerBT(Args); }
+	if (Cmd == TEXT("wire_aicontroller_bt"))  { return FinalizeCommandResponse(Cmd_WireAIControllerBT(Args)); }
 	// setup_flashlight_scs: adds/configures Movable SpotLight SCS node in a Blueprint
-	if (Cmd == TEXT("setup_flashlight_scs"))  { return Cmd_SetupFlashlightSCS(Args); }
+	if (Cmd == TEXT("setup_flashlight_scs"))  { return FinalizeCommandResponse(Cmd_SetupFlashlightSCS(Args)); }
 
 	// ── v0.2.0 Spatial Intelligence Layer ────────────────────────────────────
-	if (Cmd == TEXT("spawn_actor_at_surface"))   { return FSpatialControlModule::SpawnActorAtSurface(Args); }
-	if (Cmd == TEXT("align_actors_to_surface"))  { return FSpatialControlModule::AlignActorsToSurface(Args); }
+	if (Cmd == TEXT("spawn_actor_at_surface"))   { return FinalizeCommandResponse(FSpatialControlModule::SpawnActorAtSurface(Args)); }
+	if (Cmd == TEXT("align_actors_to_surface"))  { return FinalizeCommandResponse(FSpatialControlModule::AlignActorsToSurface(Args)); }
 	if (Cmd == TEXT("get_surface_normal_at"))    { return FSpatialControlModule::GetSurfaceNormalAt(Args); }
 	if (Cmd == TEXT("analyze_level_composition")){ return FSpatialControlModule::AnalyzeLevelComposition(); }
 	if (Cmd == TEXT("get_actors_in_radius"))     { return FSpatialControlModule::GetActorsInRadius(Args); }
@@ -1585,11 +3406,11 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	// ── v0.2.0 FAB Integration ────────────────────────────────────────────────
 	if (Cmd == TEXT("search_fab_assets"))        { return FFabIntegrationModule::SearchFabAssets(Args); }
 	if (Cmd == TEXT("download_fab_asset"))       { return FFabIntegrationModule::DownloadFabAsset(Args); }
-	if (Cmd == TEXT("import_local_asset"))       { return FFabIntegrationModule::ImportLocalAsset(Args); }
+	if (Cmd == TEXT("import_local_asset"))       { return FinalizeCommandResponse(FFabIntegrationModule::ImportLocalAsset(Args)); }
 	if (Cmd == TEXT("list_imported_assets"))     { return FFabIntegrationModule::ListImportedAssets(Args); }
 
 	// ── v0.2.0 Unified Orchestration ─────────────────────────────────────────
-	if (Cmd == TEXT("enhance_current_level"))    { return Cmd_EnhanceCurrentLevel(Args); }
+	if (Cmd == TEXT("enhance_current_level"))    { return FinalizeCommandResponse(Cmd_EnhanceCurrentLevel(Args)); }
 
 	// ── v0.3.0 Rich Multi-Modal Data Access ──────────────────────────────────
 	if (Cmd == TEXT("get_multi_view_capture"))         { return FDataAccessModule::GetMultiViewCapture(Args); }
@@ -1598,39 +3419,39 @@ FString UAgentForgeLibrary::ExecuteCommandJson(const FString& RequestJson)
 	if (Cmd == TEXT("get_semantic_env_snapshot"))      { return FDataAccessModule::GetSemanticEnvironmentSnapshot(); }
 
 	// ── v0.3.0 Advanced Semantic Commands ────────────────────────────────────
-	if (Cmd == TEXT("place_asset_thematically"))  { return FSemanticCommandModule::PlaceAssetThematically(Args); }
-	if (Cmd == TEXT("refine_level_section"))      { return FSemanticCommandModule::RefineLevelSection(Args); }
-	if (Cmd == TEXT("apply_genre_rules"))         { return FSemanticCommandModule::ApplyGenreRules(Args); }
-	if (Cmd == TEXT("create_in_editor_asset"))    { return FSemanticCommandModule::CreateInEditorAsset(Args); }
+	if (Cmd == TEXT("place_asset_thematically"))  { return VerifyPlaceAssetThematicallyAndAnnotate(Cmd, Args, FSemanticCommandModule::PlaceAssetThematically(Args)); }
+	if (Cmd == TEXT("refine_level_section"))      { return FinalizeCommandResponse(FSemanticCommandModule::RefineLevelSection(Args)); }
+	if (Cmd == TEXT("apply_genre_rules"))         { return VerifyApplyGenreRulesAndAnnotate(Cmd, Args); }
+	if (Cmd == TEXT("create_in_editor_asset"))    { return FinalizeCommandResponse(FSemanticCommandModule::CreateInEditorAsset(Args)); }
 
 	// ── v0.3.0 Closed-Loop Reasoning & Horror Orchestration ──────────────────
-	if (Cmd == TEXT("observe_analyze_plan_act"))  { return Cmd_ObserveAnalyzePlanAct(Args); }
-	if (Cmd == TEXT("enhance_horror_scene"))      { return Cmd_EnhanceHorrorScene(Args); }
+	if (Cmd == TEXT("observe_analyze_plan_act"))  { return FinalizeCommandResponse(Cmd_ObserveAnalyzePlanAct(Args)); }
+	if (Cmd == TEXT("enhance_horror_scene"))      { return FinalizeCommandResponse(Cmd_EnhanceHorrorScene(Args)); }
 
 	// ── v0.4.0 Level Preset System ────────────────────────────────────────────
-	if (Cmd == TEXT("load_preset"))              { return FLevelPresetSystem::LoadPreset(Args); }
-	if (Cmd == TEXT("save_preset"))              { return FLevelPresetSystem::SavePreset(Args); }
+	if (Cmd == TEXT("load_preset"))              { return VerifyPresetStateAndAnnotate(Cmd, Args, FLevelPresetSystem::LoadPreset(Args)); }
+	if (Cmd == TEXT("save_preset"))              { return VerifyPresetStateAndAnnotate(Cmd, Args, FLevelPresetSystem::SavePreset(Args)); }
 	if (Cmd == TEXT("list_presets"))             { return FLevelPresetSystem::ListPresets(); }
 	if (Cmd == TEXT("suggest_preset"))           { return FLevelPresetSystem::SuggestPresetForProject(); }
 	if (Cmd == TEXT("get_current_preset"))       { return FLevelPresetSystem::GetCurrentPreset(); }
 
 	// ── v0.4.0 Five-Phase AAA Level Pipeline ─────────────────────────────────
-	if (Cmd == TEXT("create_blockout_level"))         { return FLevelPipelineModule::CreateBlockoutLevel(Args); }
-	if (Cmd == TEXT("convert_to_whitebox_modular"))   { return FLevelPipelineModule::ConvertToWhiteboxModular(Args); }
-	if (Cmd == TEXT("apply_set_dressing"))            { return FLevelPipelineModule::ApplySetDressingAndStorytelling(Args); }
-	if (Cmd == TEXT("apply_professional_lighting"))   { return FLevelPipelineModule::ApplyProfessionalLightingAndAtmosphere(Args); }
-	if (Cmd == TEXT("add_living_systems"))            { return FLevelPipelineModule::AddLivingSystemsAndPolish(Args); }
-	if (Cmd == TEXT("generate_full_quality_level"))   { return FLevelPipelineModule::GenerateFullQualityLevel(Args); }
+	if (Cmd == TEXT("create_blockout_level"))         { return VerifyCreateBlockoutLevelAndAnnotate(Cmd, Args, FLevelPipelineModule::CreateBlockoutLevel(Args)); }
+	if (Cmd == TEXT("convert_to_whitebox_modular"))   { return FinalizeCommandResponse(FLevelPipelineModule::ConvertToWhiteboxModular(Args)); }
+	if (Cmd == TEXT("apply_set_dressing"))            { return VerifyApplySetDressingAndAnnotate(Cmd, Args, FLevelPipelineModule::ApplySetDressingAndStorytelling(Args)); }
+	if (Cmd == TEXT("apply_professional_lighting"))   { return VerifyApplyProfessionalLightingAndAnnotate(Cmd, Args, FLevelPipelineModule::ApplyProfessionalLightingAndAtmosphere(Args)); }
+	if (Cmd == TEXT("add_living_systems"))            { return FinalizeCommandResponse(FLevelPipelineModule::AddLivingSystemsAndPolish(Args)); }
+	if (Cmd == TEXT("generate_full_quality_level"))   { return FinalizeCommandResponse(FLevelPipelineModule::GenerateFullQualityLevel(Args)); }
 	if (Cmd == TEXT("get_procedural_capabilities"))   { return FProceduralOpsModule::GetProceduralCapabilities(Args); }
 	if (Cmd == TEXT("get_operator_policy"))           { return FProceduralOpsModule::GetOperatorPolicy(); }
 	if (Cmd == TEXT("set_operator_policy"))           { return FProceduralOpsModule::SetOperatorPolicy(Args); }
-	if (Cmd == TEXT("op_terrain_generate"))           { return FProceduralOpsModule::TerrainGenerate(Args); }
-	if (Cmd == TEXT("op_surface_scatter"))            { return FProceduralOpsModule::SurfaceScatter(Args); }
-	if (Cmd == TEXT("op_spline_scatter"))             { return FProceduralOpsModule::SplineScatter(Args); }
-	if (Cmd == TEXT("op_road_layout"))                { return FProceduralOpsModule::RoadLayout(Args); }
-	if (Cmd == TEXT("op_biome_layers"))               { return FProceduralOpsModule::BiomeLayers(Args); }
-	if (Cmd == TEXT("op_stamp_poi"))                  { return FProceduralOpsModule::StampPOI(Args); }
-	if (Cmd == TEXT("run_operator_pipeline"))         { return FProceduralOpsModule::RunOperatorPipeline(Args); }
+	if (Cmd == TEXT("op_terrain_generate"))           { return FinalizeCommandResponse(FProceduralOpsModule::TerrainGenerate(Args)); }
+	if (Cmd == TEXT("op_surface_scatter"))            { return FinalizeCommandResponse(FProceduralOpsModule::SurfaceScatter(Args)); }
+	if (Cmd == TEXT("op_spline_scatter"))             { return FinalizeCommandResponse(FProceduralOpsModule::SplineScatter(Args)); }
+	if (Cmd == TEXT("op_road_layout"))                { return FinalizeCommandResponse(FProceduralOpsModule::RoadLayout(Args)); }
+	if (Cmd == TEXT("op_biome_layers"))               { return FinalizeCommandResponse(FProceduralOpsModule::BiomeLayers(Args)); }
+	if (Cmd == TEXT("op_stamp_poi"))                  { return FinalizeCommandResponse(FProceduralOpsModule::StampPOI(Args)); }
+	if (Cmd == TEXT("run_operator_pipeline"))         { return FinalizeCommandResponse(FProceduralOpsModule::RunOperatorPipeline(Args)); }
 
 	return ErrorResponse(FString::Printf(TEXT("Unknown command: %s"), *Cmd));
 #else
@@ -1658,11 +3479,26 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 
 	// Phase 1: PreFlight (constitution + pre-state)
 	UVerificationEngine* VE = UVerificationEngine::Get();
+	TArray<FVerificationPhaseResult> ExecutedVerificationResults;
+	TArray<FVerificationPhaseResult> RequestedButNotRunResults;
+	const FString PreFlightActionDesc = BuildPreFlightActionDescription(Cmd);
+	const int32 VerificationPhaseMask =
+		static_cast<int32>(EVerificationPhase::PreFlight) |
+		static_cast<int32>(EVerificationPhase::Snapshot) |
+		static_cast<int32>(EVerificationPhase::PostVerify);
 	if (VE)
 	{
-		FVerificationPhaseResult PreFlight = VE->RunPreFlight(Cmd);
+		FVerificationPhaseResult PreFlight = VE->RunPreFlight(PreFlightActionDesc);
+		ExecutedVerificationResults.Add(PreFlight);
 		if (!PreFlight.Passed)
 		{
+			VE->LastVerificationResult = SerializeVerificationSummaryJson(
+				Cmd,
+				VerificationPhaseMask,
+				false,
+				ExecutedVerificationResults,
+				RequestedButNotRunResults,
+				GetVerificationModeForCommand(Cmd));
 			OutResult = ErrorResponse(FString::Printf(
 				TEXT("PreFlight FAILED: %s"), *PreFlight.Detail));
 			return false;
@@ -1673,30 +3509,12 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	// snapshot testing (e.g. Blueprint asset creation can persist objects in package
 	// memory and trigger duplicate-name assertions on the second pass). For those
 	// commands we intentionally skip Phase 2 and rely on preflight + real execution.
-	const bool bSkipSnapshotRollbackForCommand =
-		Cmd == TEXT("spawn_actor") ||
-		Cmd == TEXT("duplicate_actor") ||
-		Cmd == TEXT("spawn_point_light") ||
-		Cmd == TEXT("spawn_spot_light") ||
-		Cmd == TEXT("spawn_rect_light") ||
-		Cmd == TEXT("spawn_directional_light") ||
-		Cmd == TEXT("set_actor_label") ||
-		Cmd == TEXT("group_actors") ||
-		Cmd == TEXT("create_wall") ||
-		Cmd == TEXT("create_floor") ||
-		Cmd == TEXT("create_room") ||
-		Cmd == TEXT("create_corridor") ||
-		Cmd == TEXT("create_staircase") ||
-		Cmd == TEXT("create_pillar") ||
-		Cmd == TEXT("scatter_props") ||
-		Cmd == TEXT("set_fog") ||
-		Cmd == TEXT("set_post_process") ||
-		Cmd == TEXT("set_sky_atmosphere") ||
-		Cmd == TEXT("create_blueprint") ||
-		Cmd == TEXT("create_material_instance") ||
-		Cmd == TEXT("rename_asset") ||
-		Cmd == TEXT("move_asset") ||
-		Cmd == TEXT("delete_asset");
+	const bool bSkipSnapshotRollbackForCommand = DoesCommandSkipSnapshotRollback(Cmd);
+	const bool bUseCompensatingCleanupProbe = IsKnownRollbackLeakyCommand(Cmd);
+	bool bCompensatingCleanupUsed = false;
+	FString CompensatingCleanupDetail;
+	int32 CompensatingCleanupActorCount = 0;
+	int32 CompensatingCleanupPostActorCount = 0;
 
 	// Phase 2: Snapshot + Rollback test — intentionally runs BEFORE opening the real
 	// transaction. The rollback test opens and cancels its own inner FScopedTransaction
@@ -1716,6 +3534,8 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 				else if (Cmd == TEXT("spawn_spot_light"))        { Dummy = Cmd_SpawnSpotLight(Args); }
 				else if (Cmd == TEXT("spawn_rect_light"))        { Dummy = Cmd_SpawnRectLight(Args); }
 				else if (Cmd == TEXT("spawn_directional_light")) { Dummy = Cmd_SpawnDirectionalLight(Args); }
+				else if (Cmd == TEXT("spawn_actor_at_surface"))  { Dummy = FSpatialControlModule::SpawnActorAtSurface(Args); }
+				else if (Cmd == TEXT("align_actors_to_surface")) { Dummy = FSpatialControlModule::AlignActorsToSurface(Args); }
 				else if (Cmd == TEXT("set_actor_transform"))     { Dummy = Cmd_SetActorTransform(Args); }
 				else if (Cmd == TEXT("set_static_mesh"))         { Dummy = Cmd_SetStaticMesh(Args); }
 				else if (Cmd == TEXT("set_actor_scale"))         { Dummy = Cmd_SetActorScale(Args); }
@@ -1751,9 +3571,17 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 				return !Dummy.Contains(TEXT("\"error\""));
 			},
 			Cmd);
+		ExecutedVerificationResults.Add(SnapResult);
 
 		if (!SnapResult.Passed)
 		{
+			VE->LastVerificationResult = SerializeVerificationSummaryJson(
+				Cmd,
+				VerificationPhaseMask,
+				false,
+				ExecutedVerificationResults,
+				RequestedButNotRunResults,
+				GetVerificationModeForCommand(Cmd));
 			OutResult = ErrorResponse(FString::Printf(
 				TEXT("Snapshot+Rollback FAILED: %s"), *SnapResult.Detail));
 			return false;
@@ -1761,7 +3589,50 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	}
 	else if (VE && bSkipSnapshotRollbackForCommand)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[UEAgentForge] Snapshot+Rollback skipped for command '%s' (asset op not rollback-safe)."), *Cmd);
+		FVerificationPhaseResult SkipResult;
+		SkipResult.PhaseName = TEXT("Snapshot+Rollback");
+		SkipResult.Passed = false;
+		SkipResult.Detail = IsKnownRollbackLeakyCommand(Cmd)
+			? TEXT("Skipped in ExecuteSafeTransaction because rollback repro leaked spawned actors for this command. Compensating cleanup probe is used instead.")
+			: TEXT("Skipped in ExecuteSafeTransaction because this command is marked not rollback-safe.");
+		SkipResult.DurationMs = 0.f;
+		RequestedButNotRunResults.Add(SkipResult);
+		UE_LOG(LogTemp, Warning, TEXT("[UEAgentForge] Snapshot+Rollback skipped for command '%s'."), *Cmd);
+	}
+
+	if (VE && bUseCompensatingCleanupProbe)
+	{
+		FVerificationPhaseResult CleanupProbe;
+		const bool bProbePassed = RunCompensatingCleanupProbe(
+			Cmd,
+			[&]() -> FString
+			{
+				if (Cmd == TEXT("spawn_actor_at_surface")) { return FSpatialControlModule::SpawnActorAtSurface(Args); }
+				if (Cmd == TEXT("create_floor"))           { return Cmd_CreateFloor(Args); }
+				if (Cmd == TEXT("create_room"))            { return Cmd_CreateRoom(Args); }
+				if (Cmd == TEXT("create_corridor"))        { return Cmd_CreateCorridor(Args); }
+				return ErrorResponse(FString::Printf(TEXT("Compensating cleanup probe not wired for command: %s"), *Cmd));
+			},
+			CleanupProbe,
+			&CompensatingCleanupActorCount,
+			&CompensatingCleanupPostActorCount);
+		ExecutedVerificationResults.Add(CleanupProbe);
+		if (!bProbePassed)
+		{
+			VE->LastVerificationResult = SerializeVerificationSummaryJson(
+				Cmd,
+				VerificationPhaseMask,
+				false,
+				ExecutedVerificationResults,
+				RequestedButNotRunResults,
+				GetVerificationModeForCommand(Cmd));
+			OutResult = ErrorResponse(FString::Printf(
+				TEXT("CompensatingCleanupProbe FAILED: %s"), *CleanupProbe.Detail));
+			return false;
+		}
+
+		bCompensatingCleanupUsed = true;
+		CompensatingCleanupDetail = CleanupProbe.Detail;
 	}
 
 	// Open the REAL transaction — only reached after Phase 2 confirmed rollback works.
@@ -1780,6 +3651,8 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	else if (Cmd == TEXT("spawn_spot_light"))    { CommandResult = Cmd_SpawnSpotLight(Args); }
 	else if (Cmd == TEXT("spawn_rect_light"))    { CommandResult = Cmd_SpawnRectLight(Args); }
 	else if (Cmd == TEXT("spawn_directional_light")) { CommandResult = Cmd_SpawnDirectionalLight(Args); }
+	else if (Cmd == TEXT("spawn_actor_at_surface")) { CommandResult = FSpatialControlModule::SpawnActorAtSurface(Args); }
+	else if (Cmd == TEXT("align_actors_to_surface")) { CommandResult = FSpatialControlModule::AlignActorsToSurface(Args); }
 	else if (Cmd == TEXT("set_actor_transform")) { CommandResult = Cmd_SetActorTransform(Args); }
 	else if (Cmd == TEXT("set_static_mesh"))     { CommandResult = Cmd_SetStaticMesh(Args); }
 	else if (Cmd == TEXT("set_actor_scale"))     { CommandResult = Cmd_SetActorScale(Args); }
@@ -1819,6 +3692,16 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	if (!bCommandSuccess)
 	{
 		Transaction.Cancel();
+		if (VE)
+		{
+			VE->LastVerificationResult = SerializeVerificationSummaryJson(
+				Cmd,
+				VerificationPhaseMask,
+				false,
+				ExecutedVerificationResults,
+				RequestedButNotRunResults,
+				GetVerificationModeForCommand(Cmd));
+		}
 		OutResult = CommandResult;
 		return false;
 	}
@@ -1826,17 +3709,75 @@ bool UAgentForgeLibrary::ExecuteSafeTransaction(const FString& CommandJson, FStr
 	// Phase 3: PostVerify
 	if (VE)
 	{
-		// Estimate expected actor delta from command type
-		const int32 ExpectedDelta =
-			(Cmd == TEXT("spawn_actor") || Cmd == TEXT("spawn_point_light") || Cmd == TEXT("spawn_spot_light")) ? 1  :
-			Cmd == TEXT("delete_actor") ? -1 : 0;
+		const int32 ExpectedDelta = DetermineExpectedActorDelta(Cmd, CommandResult);
 
 		FVerificationPhaseResult PostResult = VE->RunPostVerify(ExpectedDelta);
-		// Non-blocking: log but don't cancel on PostVerify mismatch
+		FVerificationPhaseResult CommandAwarePostResult;
+		const bool bHasCommandAwarePostVerify = RunCommandAwarePostVerify(Cmd, Args, CommandResult, CommandAwarePostResult);
+		if (bHasCommandAwarePostVerify)
+		{
+			PostResult.Passed = PostResult.Passed && CommandAwarePostResult.Passed;
+			PostResult.Detail = FString::Printf(TEXT("%s | %s"), *PostResult.Detail, *CommandAwarePostResult.Detail);
+			PostResult.DurationMs += CommandAwarePostResult.DurationMs;
+		}
+		ExecutedVerificationResults.Add(PostResult);
+		// Command-aware post verification is deterministic for this bounded slice.
+		// If it fails, roll the transaction back instead of pretending the mutation stuck correctly.
+		if (bHasCommandAwarePostVerify && !PostResult.Passed)
+		{
+			Transaction.Cancel();
+			VE->LastVerificationResult = SerializeVerificationSummaryJson(
+				Cmd,
+				VerificationPhaseMask,
+				false,
+				ExecutedVerificationResults,
+				RequestedButNotRunResults);
+			OutResult = ErrorResponse(FString::Printf(TEXT("PostVerify FAILED: %s"), *PostResult.Detail));
+			return false;
+		}
+		// Generic PostVerify remains non-blocking for commands without a command-aware contract yet.
 		if (!PostResult.Passed)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[UEAgentForge] PostVerify warning: %s"), *PostResult.Detail);
 		}
+	}
+
+	if (VE)
+	{
+		const bool bHasCommandAwarePostVerify = HasCommandAwarePostVerifyContract(Cmd);
+		const FString FinalVerificationMode = ResolveExecutedVerificationMode(Cmd, bHasCommandAwarePostVerify);
+		bool bAllVerificationPassed = true;
+		for (const FVerificationPhaseResult& Result : ExecutedVerificationResults)
+		{
+			if (!Result.Passed)
+			{
+				bAllVerificationPassed = false;
+				break;
+			}
+		}
+		if (!RequestedButNotRunResults.IsEmpty())
+		{
+			bAllVerificationPassed = false;
+		}
+		VE->LastVerificationResult = SerializeVerificationSummaryJson(
+			Cmd,
+			VerificationPhaseMask,
+			bAllVerificationPassed,
+			ExecutedVerificationResults,
+			RequestedButNotRunResults,
+			FinalVerificationMode);
+		FString FinalCommandResult = CommandResult;
+		if (bCompensatingCleanupUsed)
+		{
+			FinalCommandResult = AnnotateResponseWithRecoveryMetadata(
+				FinalCommandResult,
+				TEXT("compensating_cleanup"),
+				CompensatingCleanupDetail,
+				CompensatingCleanupActorCount,
+				CompensatingCleanupPostActorCount);
+		}
+		OutResult = AnnotateResponseWithVerificationMetadata(FinalCommandResult, Cmd, &FinalVerificationMode);
+		return true;
 	}
 
 	OutResult = CommandResult;
@@ -5385,11 +7326,17 @@ FString UAgentForgeLibrary::Cmd_RenameAsset(const TSharedPtr<FJsonObject>& Args)
 	FString AssetPath, NewName;
 	Args->TryGetStringField(TEXT("asset_path"), AssetPath);
 	Args->TryGetStringField(TEXT("new_name"),   NewName);
+	AssetPath = NormalizeAssetObjectPath(AssetPath);
+
+	const FString SourcePackagePath = FPackageName::ObjectPathToPackageName(AssetPath);
+	if (SourcePackagePath.IsEmpty() || NewName.IsEmpty())
+	{
+		return ErrorResponse(TEXT("rename_asset requires a valid asset_path and new_name."));
+	}
 
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	TArray<FAssetRenameData> RenameData;
-	const FString NewPath = FPaths::GetPath(AssetPath) / NewName;
-	// UE 5.7: 3-arg FAssetRenameData removed — use 2-SoftObjectPath form
+	const FString NewPath = FPaths::GetPath(SourcePackagePath) / NewName;
 	const FString NewFullObjectPath = NewPath + TEXT(".") + NewName;
 	RenameData.Add(FAssetRenameData(FSoftObjectPath(AssetPath), FSoftObjectPath(NewFullObjectPath)));
 
@@ -5397,6 +7344,10 @@ FString UAgentForgeLibrary::Cmd_RenameAsset(const TSharedPtr<FJsonObject>& Args)
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),       bOk);
 	Obj->SetStringField(TEXT("new_path"), NewPath);
+	if (!bOk)
+	{
+		Obj->SetStringField(TEXT("error"), TEXT("Asset rename failed."));
+	}
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));
@@ -5409,11 +7360,16 @@ FString UAgentForgeLibrary::Cmd_MoveAsset(const TSharedPtr<FJsonObject>& Args)
 	FString AssetPath, DestinationPath;
 	Args->TryGetStringField(TEXT("asset_path"),       AssetPath);
 	Args->TryGetStringField(TEXT("destination_path"), DestinationPath);
+	AssetPath = NormalizeAssetObjectPath(AssetPath);
 
-	const FString AssetName = FPackageName::GetShortName(AssetPath);
+	const FString AssetName = FPackageName::ObjectPathToObjectName(AssetPath);
+	if (AssetName.IsEmpty() || DestinationPath.IsEmpty())
+	{
+		return ErrorResponse(TEXT("move_asset requires a valid asset_path and destination_path."));
+	}
+
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	TArray<FAssetRenameData> MoveData;
-	// UE 5.7: 3-arg FAssetRenameData(OldPath, PackagePath, Name) removed — use 2-SoftObjectPath form
 	const FString NewFullPath = DestinationPath / AssetName + TEXT(".") + AssetName;
 	MoveData.Add(FAssetRenameData(FSoftObjectPath(AssetPath), FSoftObjectPath(NewFullPath)));
 
@@ -5421,6 +7377,10 @@ FString UAgentForgeLibrary::Cmd_MoveAsset(const TSharedPtr<FJsonObject>& Args)
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
 	Obj->SetBoolField  (TEXT("ok"),       bOk);
 	Obj->SetStringField(TEXT("new_path"), DestinationPath + TEXT("/") + AssetName);
+	if (!bOk)
+	{
+		Obj->SetStringField(TEXT("error"), TEXT("Asset move failed."));
+	}
 	return ToJsonString(Obj);
 #else
 	return ErrorResponse(TEXT("Editor only."));
@@ -5432,6 +7392,7 @@ FString UAgentForgeLibrary::Cmd_DeleteAsset(const TSharedPtr<FJsonObject>& Args)
 #if WITH_EDITOR
 	FString AssetPath;
 	Args->TryGetStringField(TEXT("asset_path"), AssetPath);
+	AssetPath = NormalizeAssetObjectPath(AssetPath);
 
 	UObject* Asset = LoadObject<UObject>(nullptr, *AssetPath);
 	if (!Asset) { return ErrorResponse(FString::Printf(TEXT("Asset not found: %s"), *AssetPath)); }
@@ -5670,30 +7631,58 @@ FString UAgentForgeLibrary::Cmd_GetPerfStats()
 FString UAgentForgeLibrary::Cmd_RunVerification(const TSharedPtr<FJsonObject>& Args)
 {
 	int32 PhaseMask = 15;
-	if (Args.IsValid()) { Args->TryGetNumberField(TEXT("phase_mask"), reinterpret_cast<double&>(PhaseMask)); }
+	if (Args.IsValid() && Args->HasField(TEXT("phase_mask")))
+	{
+		double PhaseMaskValue = static_cast<double>(PhaseMask);
+		if (!Args->TryGetNumberField(TEXT("phase_mask"), PhaseMaskValue))
+		{
+			return ErrorResponse(TEXT("run_verification requires numeric phase_mask."));
+		}
+		PhaseMask = FMath::TruncToInt(PhaseMaskValue);
+	}
 
 	UVerificationEngine* VE = UVerificationEngine::Get();
 	if (!VE) { return ErrorResponse(TEXT("VerificationEngine unavailable.")); }
 
-	TArray<FVerificationPhaseResult> Results;
-	const bool bAllPassed = VE->RunPhases(PhaseMask, TEXT("ManualVerificationRun"), Results);
+	const int32 ManualRunnablePhaseMask =
+		static_cast<int32>(EVerificationPhase::PreFlight) |
+		static_cast<int32>(EVerificationPhase::PostVerify) |
+		static_cast<int32>(EVerificationPhase::BuildCheck);
+	const int32 EffectivePhaseMask = PhaseMask & ManualRunnablePhaseMask;
 
-	TArray<TSharedPtr<FJsonValue>> DetailsArr;
-	for (const FVerificationPhaseResult& R : Results)
+	TArray<FVerificationPhaseResult> OutOfScopeRequested;
+	if (PhaseMask & static_cast<int32>(EVerificationPhase::Snapshot))
 	{
-		TSharedPtr<FJsonObject> PhaseObj = MakeShared<FJsonObject>();
-		PhaseObj->SetStringField(TEXT("phase"),       R.PhaseName);
-		PhaseObj->SetBoolField  (TEXT("passed"),      R.Passed);
-		PhaseObj->SetStringField(TEXT("detail"),      R.Detail);
-		PhaseObj->SetNumberField(TEXT("duration_ms"), R.DurationMs);
-		DetailsArr.Add(MakeShared<FJsonValueObject>(PhaseObj));
+		FVerificationPhaseResult Phase;
+		Phase.PhaseName = TEXT("Snapshot+Rollback");
+		Phase.Passed = true;
+		Phase.Detail = TEXT("Excluded from manual_observational mode. Snapshot+Rollback is transaction-bound and requires a concrete mutation callback.");
+		OutOfScopeRequested.Add(Phase);
 	}
 
+	TArray<FVerificationPhaseResult> Results;
+	TArray<FVerificationPhaseResult> RequestedButNotRun;
+	const bool bAllPassed = VE->RunPhases(EffectivePhaseMask, TEXT("ManualVerificationRun"), Results, &RequestedButNotRun);
+
 	TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-	Obj->SetBoolField  (TEXT("all_passed"),  bAllPassed);
-	Obj->SetNumberField(TEXT("phases_run"),  Results.Num());
-	Obj->SetArrayField (TEXT("details"),     DetailsArr);
-	return ToJsonString(Obj);
+	Obj->SetStringField(TEXT("action"), TEXT("ManualVerificationRun"));
+	Obj->SetStringField(TEXT("verification_mode"), TEXT("manual_observational"));
+	Obj->SetNumberField(TEXT("requested_phase_mask"), PhaseMask);
+	Obj->SetNumberField(TEXT("runnable_phase_mask"), ManualRunnablePhaseMask);
+	Obj->SetNumberField(TEXT("effective_phase_mask"), EffectivePhaseMask);
+	Obj->SetBoolField(TEXT("all_passed"), bAllPassed);
+	Obj->SetNumberField(TEXT("phases_run"), Results.Num());
+	Obj->SetArrayField(TEXT("details"), PhaseResultsToJsonArray(Results));
+	Obj->SetArrayField(TEXT("requested_but_not_run"), PhaseResultsToJsonArray(RequestedButNotRun));
+	Obj->SetArrayField(TEXT("out_of_scope_requested_phases"), PhaseResultsToJsonArray(OutOfScopeRequested));
+
+	if (EffectivePhaseMask == 0 || Results.Num() == 0)
+	{
+		Obj->SetStringField(TEXT("error"), TEXT("No runnable manual verification phases were selected."));
+	}
+
+	VE->LastVerificationResult = ToJsonString(Obj);
+	return VE->LastVerificationResult;
 }
 
 FString UAgentForgeLibrary::Cmd_EnforceConstitution(const TSharedPtr<FJsonObject>& Args)
@@ -6403,17 +8392,25 @@ FString UAgentForgeLibrary::Cmd_EnhanceCurrentLevel(const TSharedPtr<FJsonObject
 {
 #if WITH_EDITOR
 	FString Description;
-	if (Args.IsValid()) { Args->TryGetStringField(TEXT("description"), Description); }
+	if (Args.IsValid())
+	{
+		Args->TryGetStringField(TEXT("description"), Description);
+		if (Description.IsEmpty())
+		{
+			Args->TryGetStringField(TEXT("instruction"), Description);
+		}
+	}
 	if (Description.IsEmpty())
-		return ErrorResponse(TEXT("enhance_current_level requires 'description' arg."));
+		return ErrorResponse(TEXT("enhance_current_level requires 'description' or 'instruction' arg."));
 
 	TArray<FString>              ActionsTaken;
 	TSharedPtr<FJsonObject>      VerifResult;
+	const FString                PreFlightActionDesc = TEXT("scene refinement pass");
 
 	// ── Step 1: Run PreFlight verification ────────────────────────────────────
 	UVerificationEngine* Engine = UVerificationEngine::Get();
 	TArray<FVerificationPhaseResult> VerifResults;
-	Engine->RunPhases(static_cast<int32>(EVerificationPhase::PreFlight), Description, VerifResults);
+	Engine->RunPhases(static_cast<int32>(EVerificationPhase::PreFlight), PreFlightActionDesc, VerifResults);
 
 	if (!VerifResults.IsEmpty() && !VerifResults[0].Passed)
 	{

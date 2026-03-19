@@ -113,6 +113,32 @@ The current repo state includes:
 
 Point your coding agent at `CODEX.md` or `program.md`, then have it work through the addendum and main plan on a dedicated implementation branch.
 
+## Structural Status
+
+The repo now uses a bounded-trust classification model instead of a generic green pass surface:
+
+- `verified_success`
+- `partial_verified_success`
+- `unverified_success`
+- `blocked`
+- `fail`
+- `no_op`
+
+Latest practical validation counts:
+
+- `47 verified_success`
+- `30 partial_verified_success`
+- `4 unverified_success`
+- `7 blocked`
+- `0 fail`
+- `0 no_op`
+
+High-value rollback-problem commands such as `create_floor`, `create_room`, `create_corridor`, and `spawn_actor_at_surface` are no longer described as rollback-safe. They use explicit compensating-cleanup semantics and surface recovery metadata in their responses.
+
+`delete_asset` remains blocked until the repo has a real explicit reference-check implementation. That is the correct current behavior.
+
+See [docs/11_structural_status.md](docs/11_structural_status.md) for the full structural status, trust model, recovery semantics, and next recommended phase.
+
 ## Quick Start
 
 ### Via Python client

@@ -212,3 +212,48 @@ Phase 1 returns an error immediately before any state is changed. This is the ch
 
 **5. Non-blocking PostVerify**
 Phase 3 warns but doesn't fail because actor count deltas can legitimately differ from expectations (engine background spawns, deferred construction, etc.). The real safety guarantee is Phase 2's rollback test, not Phase 3's count check.
+
+## Current trust model
+
+The current repository surface is intentionally classified by trust level instead of a single success bit:
+
+- `verified_success` - command claims were checked and confirmed
+- `partial_verified_success` - command succeeded, but trust is bounded by rollback or recovery limits
+- `unverified_success` - command succeeded without a strong verification contract yet
+- `blocked` - command was intentionally prevented for structural or environment reasons
+- `fail` - command behavior failed outright
+- `no_op` - command did not execute meaningful work
+
+This matters because some commands are proven useful but not rollback-safe under Unreal's transaction and undo model.
+
+### Compensating cleanup
+
+The current known rollback-problem commands are:
+
+- `create_floor`
+- `create_room`
+- `create_corridor`
+- `spawn_actor_at_surface`
+
+These commands remain partial on purpose. They use compensating cleanup, not rollback:
+
+1. run a probe execution
+2. collect spawned actor paths
+3. explicitly destroy those actors
+4. verify cleanup against world state
+5. run the real command only after cleanup passes
+
+The response metadata reflects that distinction:
+
+- `verification_mode`
+- `recovery_probe_used`
+- `recovery_mode=compensating_cleanup`
+- `recovery_detail`
+- `recovery_cleanup_actor_count`
+- `recovery_post_cleanup_actor_count`
+
+### Blocked destructive operations
+
+`delete_asset` remains blocked because the repo still lacks a real explicit reference-check path. This is a structural safety choice, not a transport or client error.
+
+For the latest validation counts and the current trusted or untrusted surfaces, see [Structural Status](11_structural_status.md).

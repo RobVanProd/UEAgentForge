@@ -1221,14 +1221,36 @@ FString FLevelPipelineModule::GenerateFullQualityLevel(const TSharedPtr<FJsonObj
 	}
 
 	// ── Save level ────────────────────────────────────────────────────────────
+	const bool bShouldSaveLevel = !Args.IsValid() || !Args->HasField(TEXT("save_level")) || Args->GetBoolField(TEXT("save_level"));
 	bool bLevelSaved = false;
+	FString LevelSaveSkippedReason;
+	if (bShouldSaveLevel)
 	{
 		TArray<UPackage*> DirtyPackages;
-		if (World->PersistentLevel)
-			DirtyPackages.Add(World->PersistentLevel->GetOutermost());
-		if (!DirtyPackages.IsEmpty())
-			bLevelSaved = (FEditorFileUtils::PromptForCheckoutAndSave(DirtyPackages, false, false)
-			               == FEditorFileUtils::EPromptReturnCode::PR_Success);
+		UPackage* PersistentPackage = World->PersistentLevel ? World->PersistentLevel->GetOutermost() : nullptr;
+		const FString PackageName = PersistentPackage ? PersistentPackage->GetName() : FString();
+		const bool bHasUntitledName = !PackageName.IsEmpty() && PackageName.Contains(TEXT("Untitled"));
+		const bool bRequiresSaveAs = PersistentPackage == nullptr
+			|| PersistentPackage->HasAnyPackageFlags(PKG_NewlyCreated)
+			|| PersistentPackage->GetLoadedPath().IsEmpty()
+			|| bHasUntitledName;
+		if (bRequiresSaveAs)
+		{
+			LevelSaveSkippedReason = TEXT("Skipping level save for unsaved or untitled map in unattended flow.");
+		}
+		else
+		{
+			DirtyPackages.Add(PersistentPackage);
+			if (!DirtyPackages.IsEmpty())
+			{
+				bLevelSaved = (FEditorFileUtils::PromptForCheckoutAndSave(DirtyPackages, false, false)
+				               == FEditorFileUtils::EPromptReturnCode::PR_Success);
+			}
+		}
+	}
+	else
+	{
+		LevelSaveSkippedReason = TEXT("save_level=false");
 	}
 
 	// ── Quality report ────────────────────────────────────────────────────────
@@ -1243,6 +1265,10 @@ FString FLevelPipelineModule::GenerateFullQualityLevel(const TSharedPtr<FJsonObj
 	Resp->SetNumberField(TEXT("iterations"),          static_cast<double>(Iteration));
 	Resp->SetStringField(TEXT("screenshot_path"),     ScreenshotPath);
 	Resp->SetBoolField  (TEXT("level_saved"),         bLevelSaved);
+	if (!LevelSaveSkippedReason.IsEmpty())
+	{
+		Resp->SetStringField(TEXT("level_save_skipped_reason"), LevelSaveSkippedReason);
+	}
 	if (P1Json.IsValid()) Resp->SetObjectField(TEXT("phase1"), P1Json);
 	if (P2Json.IsValid()) Resp->SetObjectField(TEXT("phase2"), P2Json);
 	if (P3Json.IsValid()) Resp->SetObjectField(TEXT("phase3"), P3Json);

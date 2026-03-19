@@ -65,8 +65,16 @@ public:
 	/** Singleton accessor — one engine per editor session. */
 	static UVerificationEngine* Get();
 
-	/** Run selected verification phases. Returns true if all selected phases passed. */
-	bool RunPhases(int32 PhaseMask, const FString& ActionDesc, TArray<FVerificationPhaseResult>& OutResults);
+	/**
+	 * Run verification phases that can execute in the current context.
+	 * OutResults contains only phases that actually ran.
+	 * OutUnavailableResults, when provided, contains requested phases that were not executed.
+	 */
+	bool RunPhases(
+		int32 PhaseMask,
+		const FString& ActionDesc,
+		TArray<FVerificationPhaseResult>& OutResults,
+		TArray<FVerificationPhaseResult>* OutUnavailableResults = nullptr);
 
 	/** Phase 1: Constitution + pre-state capture. */
 	FVerificationPhaseResult RunPreFlight(const FString& ActionDesc);
@@ -96,6 +104,7 @@ public:
 private:
 	/** Captured actor labels before execution — used by PostVerify. */
 	TArray<FString> PreStateActorLabels;
+	TArray<FString> PreStateActorPaths;
 	int32           PreStateActorCount = 0;
 
 	static UVerificationEngine* Singleton;

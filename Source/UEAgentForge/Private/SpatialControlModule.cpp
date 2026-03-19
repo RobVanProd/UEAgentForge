@@ -54,6 +54,52 @@ static UWorld* GetEditorWorld()
 	return GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 }
 
+static void PrepareWorldForTransactionalSpawnSC(UWorld* World)
+{
+	if (!World)
+	{
+		return;
+	}
+
+	World->SetFlags(RF_Transactional);
+	World->Modify();
+
+	ULevel* Level = World->GetCurrentLevel();
+	if (!Level)
+	{
+		Level = World->PersistentLevel.Get();
+	}
+	if (Level)
+	{
+		Level->SetFlags(RF_Transactional);
+		Level->Modify();
+	}
+}
+
+static void MarkActorTransactionalSC(AActor* Actor)
+{
+	if (!Actor)
+	{
+		return;
+	}
+
+	Actor->SetFlags(RF_Transactional);
+	Actor->Modify();
+
+	TArray<UActorComponent*> Components;
+	Actor->GetComponents(Components);
+	for (UActorComponent* Component : Components)
+	{
+		if (!Component)
+		{
+			continue;
+		}
+
+		Component->SetFlags(RF_Transactional);
+		Component->Modify();
+	}
+}
+
 /** Line-trace downward from Loc+Extent, return true + HitResult on hit. */
 static bool TraceDown(UWorld* World, FVector Loc, float DownExtent, FHitResult& OutHit)
 {
@@ -155,12 +201,15 @@ FString FSpatialControlModule::SpawnActorAtSurface(const TSharedPtr<FJsonObject>
 
 	// ── Spawn actor ───────────────────────────────────────────────────────────
 	FActorSpawnParameters SpawnParams;
+	PrepareWorldForTransactionalSpawnSC(World);
+	SpawnParams.ObjectFlags |= RF_Transactional;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	AActor* NewActor = World->SpawnActor<AActor>(SpawnClass, SpawnLoc, SpawnRot, SpawnParams);
 	if (!NewActor)
 		return SpatialError(TEXT("SpawnActor failed. Check class_path is valid."));
 
+	MarkActorTransactionalSC(NewActor);
 	if (!Label.IsEmpty()) { NewActor->SetActorLabel(Label); }
 
 	// ── Build response ────────────────────────────────────────────────────────

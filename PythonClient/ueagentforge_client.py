@@ -73,17 +73,30 @@ class ForgeResult:
 
 @dataclass
 class VerificationReport:
-    all_passed:  bool
-    phases_run:  int
+    verification_mode: str = ""
+    all_passed:  bool = False
+    phases_run:  int = 0
+    requested_phase_mask: int = 0
+    runnable_phase_mask: int = 0
+    effective_phase_mask: int = 0
     details:     List[Dict[str, Any]] = field(default_factory=list)
+    requested_but_not_run: List[Dict[str, Any]] = field(default_factory=list)
+    out_of_scope_requested_phases: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
 
     def summary(self) -> str:
-        lines = [f"Verification: {'PASSED' if self.all_passed else 'FAILED'} "
-                 f"({self.phases_run} phases)"]
+        lines = [f"Verification[{self.verification_mode or 'unknown'}]: {'PASSED' if self.all_passed else 'FAILED'} "
+                 f"({self.phases_run} phases; effective_mask={self.effective_phase_mask})"]
         for d in self.details:
             status = "âœ“" if d.get("passed") else "âœ—"
             lines.append(f"  {status} [{d.get('phase','?')}] {d.get('detail','')} "
                          f"({d.get('duration_ms', 0):.1f}ms)")
+        for d in self.requested_but_not_run:
+            lines.append(f"  ! [{d.get('phase','?')}] {d.get('detail','')}")
+        for d in self.out_of_scope_requested_phases:
+            lines.append(f"  ~ [{d.get('phase','?')}] {d.get('detail','')}")
+        if self.error:
+            lines.append(f"  error: {self.error}")
         return "\n".join(lines)
 
 
@@ -233,14 +246,21 @@ class AgentForgeClient:
 
     def run_verification(self, phase_mask: int = 15) -> VerificationReport:
         """
-        Run the 4-phase verification protocol.
+        Run manual observational verification.
         phase_mask bits: 1=PreFlight, 2=Snapshot+Rollback, 4=PostVerify, 8=BuildCheck
         """
         data = self._send("run_verification", {"phase_mask": phase_mask})
         return VerificationReport(
+            verification_mode = data.get("verification_mode", ""),
             all_passed = data.get("all_passed", False),
             phases_run = data.get("phases_run", 0),
+            requested_phase_mask = data.get("requested_phase_mask", phase_mask),
+            runnable_phase_mask = data.get("runnable_phase_mask", 0),
+            effective_phase_mask = data.get("effective_phase_mask", 0),
             details    = data.get("details", []),
+            requested_but_not_run = data.get("requested_but_not_run", []),
+            out_of_scope_requested_phases = data.get("out_of_scope_requested_phases", []),
+            error = data.get("error"),
         )
 
     def enforce_constitution(self, action_description: str) -> Dict:
@@ -925,7 +945,10 @@ class AgentForgeClient:
     ) -> ForgeResult:
         """Spawn an actor. Runs constitution + verification if self.verify is True."""
         if self.verify:
-            chk = self.enforce_constitution(f"spawn_actor {class_path}")
+            action_description = f"spawn_actor {class_path}"
+            if class_path.startswith("/Game/AgentForgeTest/"):
+                action_description = "spawn_actor from agentforge_test_sandbox"
+            chk = self.enforce_constitution(action_description)
             if not chk.get("allowed", True):
                 raise PermissionError(
                     f"Constitution blocked spawn_actor: {chk.get('violations')}")
@@ -1438,6 +1461,16 @@ class AgentForgeClient:
         if direction:
             args["direction"] = direction
         return self._send("spawn_actor_at_surface", args)
+
+    def align_actors_to_surface(
+        self,
+        actor_labels: List[str],
+        down_trace_extent: float = 2000.0,
+    ) -> Dict:
+        return self._send("align_actors_to_surface", {
+            "actor_labels": actor_labels,
+            "down_trace_extent": down_trace_extent,
+        })
 
     # â”€â”€ Blueprint manipulation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     def create_blueprint(

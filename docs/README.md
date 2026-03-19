@@ -12,6 +12,7 @@
 | 8 | [Troubleshooting](08_troubleshooting.md) | Common errors and fixes |
 | 9 | [Contributing](09_contributing.md) | How to add commands, code style, PR guidelines |
 | 10 | [Roadmap](10_roadmap.md) | Planned features v0.2.0 through v1.0.0 |
+| 11 | [Structural Status](11_structural_status.md) | Current trust model, recovery semantics, validation counts, and next structural phase |
 
 ## Quick links
 

@@ -31,6 +31,11 @@ FString                     FLevelPresetSystem::CurrentPresetName = TEXT("Defaul
 // ─────────────────────────────────────────────────────────────────────────────
 FString FLevelPresetSystem::PresetDir()
 {
+	return FPaths::ProjectSavedDir() / TEXT("AgentForge/Presets/");
+}
+
+static FString LegacyPresetDir()
+{
 	return FPaths::ProjectContentDir() / TEXT("AgentForge/Presets/");
 }
 
@@ -40,6 +45,23 @@ static FString ToJson(const TSharedPtr<FJsonObject>& Obj)
 	TSharedRef<TJsonWriter<>> W = TJsonWriterFactory<>::Create(&Out);
 	FJsonSerializer::Serialize(Obj.ToSharedRef(), W);
 	return Out;
+}
+
+static bool TryGetPresetNameArg(const TSharedPtr<FJsonObject>& Args, FString& OutName)
+{
+	if (!Args.IsValid())
+	{
+		return false;
+	}
+	if (Args->TryGetStringField(TEXT("preset_name"), OutName) && !OutName.IsEmpty())
+	{
+		return true;
+	}
+	if (Args->TryGetStringField(TEXT("name"), OutName) && !OutName.IsEmpty())
+	{
+		return true;
+	}
+	return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,20 +280,23 @@ void FLevelPresetSystem::RegisterBuiltinPresets()
 // ─────────────────────────────────────────────────────────────────────────────
 void FLevelPresetSystem::ScanPresetDir()
 {
-	const FString Dir = PresetDir();
-	TArray<FString> Files;
-	IFileManager::Get().FindFiles(Files, *(Dir + TEXT("*.json")), true, false);
-	for (const FString& File : Files)
+	const TArray<FString> Dirs = { PresetDir(), LegacyPresetDir() };
+	for (const FString& Dir : Dirs)
 	{
-		FString JsonStr;
-		if (!FFileHelper::LoadFileToString(JsonStr, *(Dir + File))) { continue; }
-		TSharedPtr<FJsonObject> J;
-		TSharedRef<TJsonReader<>> R = TJsonReaderFactory<>::Create(JsonStr);
-		if (!FJsonSerializer::Deserialize(R, J) || !J.IsValid()) { continue; }
-		FLevelPreset P = JsonToPreset(J);
-		if (!P.PresetName.IsEmpty())
+		TArray<FString> Files;
+		IFileManager::Get().FindFiles(Files, *(Dir + TEXT("*.json")), true, false);
+		for (const FString& File : Files)
 		{
-			LoadedPresets.Add(P.PresetName, P);
+			FString JsonStr;
+			if (!FFileHelper::LoadFileToString(JsonStr, *(Dir + File))) { continue; }
+			TSharedPtr<FJsonObject> J;
+			TSharedRef<TJsonReader<>> R = TJsonReaderFactory<>::Create(JsonStr);
+			if (!FJsonSerializer::Deserialize(R, J) || !J.IsValid()) { continue; }
+			FLevelPreset P = JsonToPreset(J);
+			if (!P.PresetName.IsEmpty())
+			{
+				LoadedPresets.Add(P.PresetName, P);
+			}
 		}
 	}
 }
@@ -302,10 +327,10 @@ const FLevelPreset& FLevelPresetSystem::GetCurrentPresetData()
 FString FLevelPresetSystem::LoadPreset(const TSharedPtr<FJsonObject>& Args)
 {
 	FString Name;
-	if (!Args.IsValid() || !Args->TryGetStringField(TEXT("preset_name"), Name) || Name.IsEmpty())
+	if (!TryGetPresetNameArg(Args, Name))
 	{
 		TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
-		Err->SetStringField(TEXT("error"), TEXT("preset_name argument is required."));
+		Err->SetStringField(TEXT("error"), TEXT("preset_name (or name) argument is required."));
 		return ToJson(Err);
 	}
 
@@ -313,21 +338,32 @@ FString FLevelPresetSystem::LoadPreset(const TSharedPtr<FJsonObject>& Args)
 	if (LoadedPresets.Num() == 0) { RegisterBuiltinPresets(); }
 
 	// Try JSON file first.
-	const FString FilePath = PresetDir() + Name + TEXT(".json");
-	if (IFileManager::Get().FileExists(*FilePath))
+	const TArray<FString> CandidateFiles =
 	{
-		FString JsonStr;
-		if (FFileHelper::LoadFileToString(JsonStr, *FilePath))
+		PresetDir() + Name + TEXT(".json"),
+		LegacyPresetDir() + Name + TEXT(".json"),
+	};
+	for (const FString& FilePath : CandidateFiles)
+	{
+		if (!IFileManager::Get().FileExists(*FilePath))
 		{
-			TSharedPtr<FJsonObject> J;
-			TSharedRef<TJsonReader<>> R = TJsonReaderFactory<>::Create(JsonStr);
-			if (FJsonSerializer::Deserialize(R, J) && J.IsValid())
-			{
-				FLevelPreset P = JsonToPreset(J);
-				LoadedPresets.Add(P.PresetName, P);
-				CurrentPresetName = P.PresetName;
-				return ToJson(PresetToJson(P));
-			}
+			continue;
+		}
+
+		FString JsonStr;
+		if (!FFileHelper::LoadFileToString(JsonStr, *FilePath))
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> J;
+		TSharedRef<TJsonReader<>> R = TJsonReaderFactory<>::Create(JsonStr);
+		if (FJsonSerializer::Deserialize(R, J) && J.IsValid())
+		{
+			FLevelPreset P = JsonToPreset(J);
+			LoadedPresets.Add(P.PresetName, P);
+			CurrentPresetName = P.PresetName;
+			return ToJson(PresetToJson(P));
 		}
 	}
 
@@ -354,19 +390,19 @@ FString FLevelPresetSystem::SavePreset(const TSharedPtr<FJsonObject>& Args)
 
 	// Build preset from args.
 	FLevelPreset P;
-	Args->TryGetStringField(TEXT("preset_name"), P.PresetName);
+	TryGetPresetNameArg(Args, P.PresetName);
 	Args->TryGetStringField(TEXT("description"), P.Description);
 	if (P.PresetName.IsEmpty())
 	{
 		TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
-		Err->SetStringField(TEXT("error"), TEXT("preset_name is required."));
+		Err->SetStringField(TEXT("error"), TEXT("preset_name (or name) is required."));
 		return ToJson(Err);
 	}
 
 	// Allow partial overrides on top of an existing preset.
 	if (LoadedPresets.Contains(P.PresetName)) { P = LoadedPresets[P.PresetName]; }
 	// Re-read name/desc after potential clobber.
-	Args->TryGetStringField(TEXT("preset_name"), P.PresetName);
+	TryGetPresetNameArg(Args, P.PresetName);
 	Args->TryGetStringField(TEXT("description"), P.Description);
 	// Numeric fields
 	Args->TryGetNumberField(TEXT("standard_ceiling_height_cm"), P.StandardCeilingHeightCm);
@@ -412,6 +448,12 @@ FString FLevelPresetSystem::SavePreset(const TSharedPtr<FJsonObject>& Args)
 	const FString FilePath = Dir + P.PresetName + TEXT(".json");
 	const FString JsonStr  = ToJson(PresetToJson(P));
 	FFileHelper::SaveStringToFile(JsonStr, *FilePath);
+
+	const FString LegacyFilePath = LegacyPresetDir() + P.PresetName + TEXT(".json");
+	if (IFileManager::Get().FileExists(*LegacyFilePath))
+	{
+		IFileManager::Get().Delete(*LegacyFilePath, false, true, true);
+	}
 
 	LoadedPresets.Add(P.PresetName, P);
 	CurrentPresetName = P.PresetName;

@@ -1,88 +1,100 @@
 # Roadmap
 
-## v0.1.0 — Foundation ✅ Complete
+## v0.1.0 - Foundation Complete
 
 - [x] Core plugin structure (`UAgentForgeLibrary`, `UVerificationEngine`, `UConstitutionParser`)
-- [x] 30+ commands: observation, actor control, spatial queries, Blueprint manipulation, material instancing, content management, transaction safety, Python scripting, performance profiling, scene setup
+- [x] 30+ commands across observation, actor control, spatial queries, Blueprint manipulation, material instancing, content management, transaction safety, Python scripting, performance profiling, and scene setup
 - [x] 4-phase verification protocol (PreFlight, Snapshot+Rollback, PostVerify, BuildCheck)
 - [x] Constitution system (markdown rule parsing, runtime enforcement)
 - [x] Python client with transaction context manager
-- [x] 3 example scripts
-- [x] Full documentation (9 docs + README)
+- [x] Example scripts
+- [x] Full documentation and README
 - [x] MIT license
 
-## v0.2.0 — Spatial Intelligence + FAB Integration ✅ Complete
+## v0.2.0 - Spatial Intelligence and Fab Integration Complete
 
-- [x] `spawn_actor_at_surface` — raycast + surface-normal-aligned spawn
-- [x] `align_actors_to_surface` — drop actors to nearest surface
-- [x] `get_surface_normal_at` — surface normal query for AI placement
-- [x] `analyze_level_composition` — actor density, bounding box, AI recommendations
-- [x] `get_actors_in_radius` — sphere search sorted by distance
-- [x] `search_fab_assets` — Fab.com web search (free-only default, synchronous HTTP)
-- [x] `download_fab_asset` — stub with workaround docs (no public Fab API)
-- [x] `import_local_asset` — import FBX/OBJ/PNG/WAV from disk via AssetTools
-- [x] `list_imported_assets` — list assets in any Content Browser folder
-- [x] `enhance_current_level` — natural language → orchestrated multi-command improvement loop
-- [x] HTTP + AudioEditor module dependencies added
-- [x] 3 Python example scripts
+- [x] `spawn_actor_at_surface`
+- [x] `align_actors_to_surface`
+- [x] `get_surface_normal_at`
+- [x] `analyze_level_composition`
+- [x] `get_actors_in_radius`
+- [x] `search_fab_assets`
+- [x] `download_fab_asset` stub with workaround guidance
+- [x] `import_local_asset`
+- [x] `list_imported_assets`
+- [x] `enhance_current_level`
+- [x] HTTP and AudioEditor module dependencies
+- [x] Example scripts
 
-## v0.3.0 — Advanced Intelligence & Horror Optimization ✅ Complete
+## v0.3.0 - Advanced Intelligence and Horror Optimization Complete
 
-- [x] `get_multi_view_capture` — capture scene from multiple angles
-- [x] `get_level_hierarchy` — full actor hierarchy with parent-child trees
-- [x] `get_deep_properties` — nested component property inspection
-- [x] `get_semantic_env_snapshot` — rich LLM-ready scene description
-- [x] `place_asset_thematically` — genre-aware placement (horror/sci-fi/fantasy)
-- [x] `refine_level_section` — spatial region improvement loop
-- [x] `apply_genre_rules` — full-level genre rule application
-- [x] `create_in_editor_asset` — factory-based in-editor asset creation
-- [x] `observe_analyze_plan_act` — full Observe-Analyze-Plan-Act loop
-- [x] `enhance_horror_scene` — closed-loop horror tension pipeline
-- [x] `set_bt_blackboard` — links BlackboardData to BehaviorTree (bypasses Python CPF_Protected)
-- [x] `wire_aicontroller_bt` — wires BeginPlay→RunBehaviorTree in AIController (bypasses UbergraphPages)
+- [x] `get_multi_view_capture`
+- [x] `get_level_hierarchy`
+- [x] `get_deep_properties`
+- [x] `get_semantic_env_snapshot`
+- [x] `place_asset_thematically`
+- [x] `refine_level_section`
+- [x] `apply_genre_rules`
+- [x] `create_in_editor_asset`
+- [x] `observe_analyze_plan_act`
+- [x] `enhance_horror_scene`
+- [x] `set_bt_blackboard`
+- [x] `wire_aicontroller_bt`
 
-## v0.4.0 — Professional Quality Level Generation Pipeline ✅ Complete
+## v0.4.0 - Professional Quality Level Generation Pipeline Complete
 
 Released: February 2026
 
-- [x] `list_presets` — list all named level presets (5 built-in: Default/Horror/SciFi/Fantasy/Military)
-- [x] `load_preset` — apply preset settings to current level
-- [x] `save_preset` — save current configuration as a named preset (JSON persistence)
-- [x] `suggest_preset` — AI-driven preset recommendation based on project content
-- [x] `get_current_preset` — retrieve active preset metadata
-- [x] `create_blockout_level` — Phase I: blockout geometry generation
-- [x] `convert_to_whitebox_modular` — Phase II: modular static mesh replacement
-- [x] `apply_set_dressing` — Phase III: storytelling props and environmental detail
-- [x] `apply_professional_lighting` — Phase IV: atmosphere, lighting, post-process
-- [x] `add_living_systems` — Phase V: NavMesh, AI spawns, particles, audio volumes
-- [x] `generate_full_quality_level` — master command: all 5 phases + quality-scoring loop
-- [x] JSON preset persistence in `Content/AgentForge/Presets/`
-- [x] 3 Python example scripts: blockout-only, full pipeline, custom preset authoring
+- [x] `list_presets`
+- [x] `load_preset`
+- [x] `save_preset`
+- [x] `suggest_preset`
+- [x] `get_current_preset`
+- [x] `create_blockout_level`
+- [x] `convert_to_whitebox_modular`
+- [x] `apply_set_dressing`
+- [x] `apply_professional_lighting`
+- [x] `add_living_systems`
+- [x] `generate_full_quality_level`
+- [x] JSON preset persistence
+- [x] Example scripts
 
-## v0.5.0 — Multi-Agent & Collaboration
+## v0.5.0 - Multi-Agent and Collaboration
 
-**Target:** Q3 2026
+Target: Q3 2026
 
-- [ ] Agent identity — tag commands with an `agent_id` for multi-agent tracing
-- [ ] Command queue — submit multiple commands in one HTTP call with ordered execution
-- [ ] WebSocket transport — lower latency than polling for event-driven agents
-- [ ] Constitution remote URL — load rules from a team-shared endpoint
-- [ ] Audit log — structured log of all commands with agent ID, timestamp, result
-- [ ] `lock_actor` / `unlock_actor` — prevent concurrent agent edits on the same object
-- [ ] World Partition support: `load_cell`, `unload_cell`, `get_loaded_cells`
-- [ ] Level streaming: `load_sublevel`, `unload_sublevel`, `get_sublevels`
+- [ ] Agent identity for multi-agent tracing
+- [ ] Command queue with ordered execution
+- [ ] WebSocket transport
+- [ ] Constitution remote URL support
+- [ ] Audit log with agent ID, timestamp, and result
+- [ ] `lock_actor` and `unlock_actor`
+- [ ] World Partition support
+- [ ] Level streaming support
 
-## v1.0.0 — Production Release
+## Current structural next phase
 
-**Target:** Q1 2027
+The current repo state is in trusted-surface expansion mode. The next structural work should stay focused:
 
-- [ ] Full automated test coverage (all commands tested)
-- [ ] GitHub Actions CI (builds against UE 5.5, 5.6, 5.7)
-- [ ] Packaged plugin (`.uplugin` zip for direct installation)
+1. Reduce one more high-value unverified pipeline or orchestration surface.
+   Best current candidates: `op_terrain_generate` or a bounded slice of `generate_full_quality_level`.
+2. Preserve and tighten truthful recovery metadata.
+   Keep compensating-cleanup paths inspectable and do not upgrade them into rollback claims without proof.
+3. Leave `delete_asset` blocked until reference analysis is real.
+4. Begin the visual stability validation layer.
+   Start with overlapping geometry, duplicate generated actors, competing directional lights, and flicker or z-fighting heuristics.
+
+## v1.0.0 - Production Release
+
+Target: Q1 2027
+
+- [ ] Full automated test coverage
+- [ ] GitHub Actions CI for UE 5.5, 5.6, and 5.7
+- [ ] Packaged plugin distribution
 - [ ] GitHub Pages documentation site
 - [ ] Video tutorials
-- [ ] Example project (standalone UE5 project demonstrating all features)
-- [ ] Stable API guarantee (no breaking changes without major version bump)
+- [ ] Example project
+- [ ] Stable API guarantee
 
 ## Feature requests
 

@@ -23,6 +23,118 @@
 
 UVerificationEngine* UVerificationEngine::Singleton = nullptr;
 
+namespace
+{
+static void CollectCurrentActorState(UWorld* World, TArray<FString>& OutLabels, TArray<FString>& OutPaths, int32& OutCount)
+{
+	OutLabels.Empty();
+	OutPaths.Empty();
+	OutCount = 0;
+	if (!World)
+	{
+		return;
+	}
+
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor || !IsValid(Actor))
+		{
+			continue;
+		}
+
+		OutLabels.Add(Actor->GetActorLabel());
+		OutPaths.Add(Actor->GetPathName());
+		++OutCount;
+	}
+}
+
+static FString BuildRollbackLeakSummary(const TArray<FString>& PrePaths, const TArray<FString>& PostPaths)
+{
+	TSet<FString> PreSet(PrePaths);
+	TSet<FString> PostSet(PostPaths);
+	TArray<FString> Added = PostSet.Difference(PreSet).Array();
+	Added.Sort();
+
+	if (Added.IsEmpty())
+	{
+		return TEXT("No extra actor paths detected; rollback leak source unresolved.");
+	}
+
+	const int32 MaxListed = FMath::Min(Added.Num(), 6);
+	TArray<FString> Trimmed;
+	for (int32 Index = 0; Index < MaxListed; ++Index)
+	{
+		Trimmed.Add(Added[Index]);
+	}
+
+	FString Summary = FString::Printf(TEXT("Leaked actors (%d): %s"), Added.Num(), *FString::Join(Trimmed, TEXT(", ")));
+	if (Added.Num() > MaxListed)
+	{
+		Summary += FString::Printf(TEXT(" ... +%d more"), Added.Num() - MaxListed);
+	}
+	return Summary;
+}
+
+static FString SerializeVerificationRun(
+	const int32 PhaseMask,
+	const FString& ActionDesc,
+	const bool bAllPassed,
+	const TArray<FVerificationPhaseResult>& ExecutedResults,
+	const TArray<FVerificationPhaseResult>& UnavailableResults)
+{
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("action"), ActionDesc);
+	Root->SetNumberField(TEXT("requested_phase_mask"), PhaseMask);
+	Root->SetBoolField(TEXT("all_passed"), bAllPassed);
+	Root->SetNumberField(TEXT("phases_run"), ExecutedResults.Num());
+
+	TArray<TSharedPtr<FJsonValue>> DetailsArr;
+	for (const FVerificationPhaseResult& Result : ExecutedResults)
+	{
+		TSharedPtr<FJsonObject> PhaseObj = MakeShared<FJsonObject>();
+		PhaseObj->SetStringField(TEXT("phase"), Result.PhaseName);
+		PhaseObj->SetBoolField(TEXT("passed"), Result.Passed);
+		PhaseObj->SetStringField(TEXT("detail"), Result.Detail);
+		PhaseObj->SetNumberField(TEXT("duration_ms"), Result.DurationMs);
+		DetailsArr.Add(MakeShared<FJsonValueObject>(PhaseObj));
+	}
+	Root->SetArrayField(TEXT("details"), DetailsArr);
+
+	TArray<TSharedPtr<FJsonValue>> UnavailableArr;
+	for (const FVerificationPhaseResult& Result : UnavailableResults)
+	{
+		TSharedPtr<FJsonObject> PhaseObj = MakeShared<FJsonObject>();
+		PhaseObj->SetStringField(TEXT("phase"), Result.PhaseName);
+		PhaseObj->SetBoolField(TEXT("passed"), Result.Passed);
+		PhaseObj->SetStringField(TEXT("detail"), Result.Detail);
+		PhaseObj->SetNumberField(TEXT("duration_ms"), Result.DurationMs);
+		UnavailableArr.Add(MakeShared<FJsonValueObject>(PhaseObj));
+	}
+	Root->SetArrayField(TEXT("requested_but_not_run"), UnavailableArr);
+
+	if (ExecutedResults.IsEmpty())
+	{
+		Root->SetStringField(TEXT("error"), TEXT("No verification phases executed."));
+	}
+
+	FString Out;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+	return Out;
+}
+
+static FVerificationPhaseResult MakeUnavailablePhaseResult(const FString& PhaseName, const FString& Detail)
+{
+	FVerificationPhaseResult Result;
+	Result.PhaseName = PhaseName;
+	Result.Passed = false;
+	Result.Detail = Detail;
+	Result.DurationMs = 0.f;
+	return Result;
+}
+}
+
 // ============================================================================
 UVerificationEngine* UVerificationEngine::Get()
 {
@@ -35,14 +147,24 @@ UVerificationEngine* UVerificationEngine::Get()
 }
 
 // ============================================================================
-bool UVerificationEngine::RunPhases(int32 PhaseMask, const FString& ActionDesc,
-                                    TArray<FVerificationPhaseResult>& OutResults)
+bool UVerificationEngine::RunPhases(
+	int32 PhaseMask,
+	const FString& ActionDesc,
+	TArray<FVerificationPhaseResult>& OutResults,
+	TArray<FVerificationPhaseResult>* OutUnavailableResults)
 {
 	OutResults.Empty();
+	TArray<FVerificationPhaseResult> LocalUnavailableResults;
+	if (OutUnavailableResults)
+	{
+		OutUnavailableResults->Empty();
+	}
 	bool bAllPassed = true;
+	bool bAnyPhaseRequested = false;
 
 	if (PhaseMask & static_cast<int32>(EVerificationPhase::PreFlight))
 	{
+		bAnyPhaseRequested = true;
 		FVerificationPhaseResult Result = RunPreFlight(ActionDesc);
 		OutResults.Add(Result);
 		if (!Result.Passed) { bAllPassed = false; }
@@ -50,6 +172,51 @@ bool UVerificationEngine::RunPhases(int32 PhaseMask, const FString& ActionDesc,
 
 	// Phase 2 is executed inline with the command via RunSnapshotRollback — not here.
 	// Phases 3 and 4 are called after execution.
+
+	if (PhaseMask & static_cast<int32>(EVerificationPhase::Snapshot))
+	{
+		bAnyPhaseRequested = true;
+		LocalUnavailableResults.Add(MakeUnavailablePhaseResult(
+			TEXT("Snapshot+Rollback"),
+			TEXT("Not executed by RunPhases. Snapshot+Rollback requires a concrete mutation callback and only runs inline during ExecuteSafeTransaction.")));
+		bAllPassed = false;
+	}
+
+	if (PhaseMask & static_cast<int32>(EVerificationPhase::PostVerify))
+	{
+		bAnyPhaseRequested = true;
+		FVerificationPhaseResult Result = RunPostVerify(0);
+		OutResults.Add(Result);
+		if (!Result.Passed) { bAllPassed = false; }
+	}
+
+	if (PhaseMask & static_cast<int32>(EVerificationPhase::BuildCheck))
+	{
+		bAnyPhaseRequested = true;
+		FVerificationPhaseResult Result = RunBuildCheck();
+		OutResults.Add(Result);
+		if (!Result.Passed) { bAllPassed = false; }
+	}
+
+	if (!bAnyPhaseRequested || OutResults.IsEmpty())
+	{
+		LocalUnavailableResults.Add(MakeUnavailablePhaseResult(
+			TEXT("NoOp"),
+			FString::Printf(TEXT("No verification phases executed for phase_mask=%d."), PhaseMask)));
+		bAllPassed = false;
+	}
+
+	if (OutUnavailableResults)
+	{
+		OutUnavailableResults->Append(LocalUnavailableResults);
+	}
+
+	LastVerificationResult = SerializeVerificationRun(
+		PhaseMask,
+		ActionDesc,
+		bAllPassed,
+		OutResults,
+		LocalUnavailableResults);
 
 	return bAllPassed;
 }
@@ -81,21 +248,11 @@ FVerificationPhaseResult UVerificationEngine::RunPreFlight(const FString& Action
 
 	// 1b. Capture pre-state actor list
 	PreStateActorLabels.Empty();
+	PreStateActorPaths.Empty();
 	PreStateActorCount = 0;
 
 	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-	if (World)
-	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			AActor* Actor = *It;
-			if (Actor && IsValid(Actor))
-			{
-				PreStateActorLabels.Add(Actor->GetActorLabel());
-				++PreStateActorCount;
-			}
-		}
-	}
+	CollectCurrentActorState(World, PreStateActorLabels, PreStateActorPaths, PreStateActorCount);
 
 	Result.Passed = true;
 	Result.Detail = FString::Printf(
@@ -135,22 +292,18 @@ FVerificationPhaseResult UVerificationEngine::RunSnapshotRollback(
 
 	// Step 4: Verify state matches pre-snapshot
 	UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+	TArray<FString> PostRollbackLabels;
+	TArray<FString> PostRollbackPaths;
 	int32 PostRollbackCount = 0;
-	if (World)
-	{
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			if (*It && IsValid(*It)) { ++PostRollbackCount; }
-		}
-	}
+	CollectCurrentActorState(World, PostRollbackLabels, PostRollbackPaths, PostRollbackCount);
 
 	const bool bRollbackCorrect = (PostRollbackCount == PreStateActorCount);
 	if (!bRollbackCorrect)
 	{
 		Result.Passed = false;
 		Result.Detail = FString::Printf(
-			TEXT("Rollback verification FAILED: expected %d actors, got %d after undo."),
-			PreStateActorCount, PostRollbackCount);
+			TEXT("Rollback verification FAILED: expected %d actors, got %d after undo. %s"),
+			PreStateActorCount, PostRollbackCount, *BuildRollbackLeakSummary(PreStateActorPaths, PostRollbackPaths));
 		Result.DurationMs = static_cast<float>((FPlatformTime::Seconds() - StartTime) * 1000.0);
 		return Result;
 	}

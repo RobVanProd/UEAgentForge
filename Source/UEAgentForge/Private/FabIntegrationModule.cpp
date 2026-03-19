@@ -209,6 +209,8 @@ FString FFabIntegrationModule::DownloadFabAsset(const TSharedPtr<FJsonObject>& A
 {
 	TSharedPtr<FJsonObject> O = MakeShared<FJsonObject>();
 	O->SetBoolField  (TEXT("ok"),           false);
+	O->SetBoolField  (TEXT("unsupported_external_dependency"), true);
+	O->SetStringField(TEXT("availability"), TEXT("unsupported_external_dependency"));
 	O->SetStringField(TEXT("error"),
 		TEXT("Fab.com does not provide a public download API. "
 		     "Asset downloads require the Epic Games Launcher or "
